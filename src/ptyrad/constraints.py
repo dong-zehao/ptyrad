@@ -182,7 +182,8 @@ class CombinedConstraint(torch.nn.Module):
         obj_type           = self.constraint_params['complex_ratio']['obj_type']
         alpha1             = self.constraint_params['complex_ratio']['alpha1']
         alpha2             = self.constraint_params['complex_ratio']['alpha2']
-        if complex_ratio_freq is not None and niter % complex_ratio_freq == 0:
+        Niter_end          = self.constraint_params['complex_ratio']['Niter_end']
+        if complex_ratio_freq is not None and niter % complex_ratio_freq == 0 and niter < Niter_end:
             objac, objpc, Cbar = complex_ratio_constraint(model, alpha1, alpha2)
             if obj_type in ['amplitude', 'both']:
                 model.opt_obja.data = objac
@@ -200,7 +201,8 @@ class CombinedConstraint(torch.nn.Module):
         relax            = self.constraint_params['mirrored_amp']['relax']
         scale           = self.constraint_params['mirrored_amp']['scale']
         power           = self.constraint_params['mirrored_amp']['power']
-        if mirrored_amp_freq is not None and niter % mirrored_amp_freq == 0:
+        Niter_end       = self.constraint_params['mirrored_amp']['Niter_end']
+        if mirrored_amp_freq is not None and niter % mirrored_amp_freq == 0 and niter < Niter_end:
             v_power = model.opt_objp.clamp(min=0).pow(power)
             # amp_new = torch.exp(-scale*v_power)
             amp_new = 1-scale*v_power
