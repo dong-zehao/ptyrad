@@ -312,12 +312,12 @@ def orthogonalize_modes_vec(modes, sort = False):
         modes = torch.complex(modes, torch.zeros_like(modes))
     input_shape = modes.shape
     modes_reshaped = modes.reshape(input_shape[0], -1) # Reshape modes to have a shape of (Nmode, X*Y)
-    A = torch.matmul(modes_reshaped, modes_reshaped.H()) # A = M M^T
+    A = torch.matmul(modes_reshaped, modes_reshaped.H) # A = M M^T
 
     _, evecs = torch.linalg.eig(A)
    
     # Matrix-multiplication version (N,N) @ (N,YX) = (N,YX)
-    ortho_modes = torch.matmul(evecs.H(), modes_reshaped).reshape(input_shape)
+    ortho_modes = torch.matmul(evecs.H, modes_reshaped).reshape(input_shape)
 
     # sort modes by their contribution
     if sort:
