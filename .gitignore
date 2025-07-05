@@ -6,3 +6,4 @@ output/
 __pycache__
 *.sqlite3
 *.egg-info/
+.vscode/

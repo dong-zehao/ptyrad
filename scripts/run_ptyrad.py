@@ -31,13 +31,13 @@ if __name__ == "__main__":
     logger = CustomLogger(log_file='ptyrad_log.txt', log_dir='auto', prefix_date=True, prefix_jobid=args.jobid, append_to_file=True, show_timestamp=True)
     
     # Set up accelerator for multiGPU/mixed-precision setting, note that thess has no effect when we launch it with just `python <script>`
-    accelerator = set_accelerator()
-        
+    # accelerator = set_accelerator()
+    
     print_system_info()
     params = load_params(args.params_path)
     device = set_gpu_device(args.gpuid)
     
-    ptycho_solver = PtyRADSolver(params, device=device, acc=accelerator, logger=logger)
+    ptycho_solver = PtyRADSolver(params, device=device, logger=logger)
 
     ptycho_solver.run()
 
