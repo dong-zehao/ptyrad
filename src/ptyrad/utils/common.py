@@ -6,6 +6,18 @@ from time import perf_counter
 import torch
 import torch.distributed as dist
 
+def torch_phasor(phase):
+    """
+    Creates a complex tensor with unit magnitude using the phase.
+
+    Args:
+        phase (torch.Tensor): phase angle for the exp(i*theta)
+        
+    Note:
+        This util function is created so torch.compile can properly handle complex tensors,
+        because torch.exp(1j*phase) involves the 1j which is actually a Python built-in that can't be traced.
+    """
+    return torch.polar(torch.ones_like(phase), phase)
 
 # Only used in run_ptyrad.py, might have a better place
 def set_accelerator():
