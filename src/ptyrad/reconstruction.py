@@ -3,6 +3,7 @@
 from copy import deepcopy
 import logging
 from random import shuffle
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -25,6 +26,16 @@ from ptyrad.utils import (
 )
 from ptyrad.visualization import plot_pos_grouping, plot_summary
 
+# This suppresses the '..._inductor/compile_fx.py:236: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. 
+# Consider setting `torch.set_float32_matmul_precision('high')` for better performance.'
+# Although I didn't see much effect on performance because there's very little matrix multiplication in PtyRAD.
+torch.set_float32_matmul_precision('high') 
+
+# The actual performance is significantly better than 'eager' so I supress this for clarity
+warnings.filterwarnings(
+    "ignore",
+    message="Torchinductor does not support code generation for complex operators. Performance may be worse than eager."
+)
 
 class PtyRADSolver(object):
     """
@@ -530,6 +541,18 @@ def make_batches(indices, pos, batch_size, mode='random', verbose=True):
             sparse_batches = [np.array(batch) for batch in sparse_batches]
             return sparse_batches
 
+def parse_torch_compile_configs(configs):
+    """
+    Convert user-facing CompilerConfigs to dict suitable for torch.compile
+    
+    Note:
+        The params.yaml defines as 'enable': bool = False, 
+        while torch.compile takes only 'disable': bool, so a conversion is needed.
+    """
+    if 'enable' in configs:
+        configs['disable'] = not configs.pop('enable')
+    return configs
+
 def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, batches, output_path, acc=None):
     """
     Executes the iterative optimization loop for ptychographic reconstruction.
@@ -570,14 +593,20 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     SAVE_ITERS        = recon_params['SAVE_ITERS']
     grad_accumulation = recon_params['BATCH_SIZE'].get("grad_accumulation", 1)
     selected_figs     = recon_params['selected_figs']
+    compiler_configs  = parse_torch_compile_configs(recon_params['compiler_configs'])
     verbose           = not recon_params['if_quiet']
+    
+    # torch.compile options
+    vprint(f"### Setting PyTorch compiler with {compiler_configs} ###", verbose=verbose)
+    vprint(" ", verbose=verbose)
+    recon_step_compiled = torch.compile(recon_step, **compiler_configs)
     
     vprint("### Start the PtyRAD iterative ptycho reconstruction ###", verbose=verbose)
     
     # Optimization loop
     for niter in range(1,NITER+1):
         
-        batch_losses = recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose, acc=acc)
+        batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose, acc=acc)
         
         # Only log the main process
         if acc is None or acc.is_main_process:
@@ -719,6 +748,10 @@ def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint
         model_instance.avg_tilt_iters.append((niter, model_instance.opt_obj_tilts.detach().mean(0).cpu().numpy()))
     return batch_losses
 
+# TODO Need to find a workaround to enable this grad toggle during torch.compile
+# This is ignored by torch.compile because torch.compile will only compile the graph given the 1st iteration
+# One solution would be to calculate grads for all tensors and manually mask it, but this is a bit wasteful
+torch.compiler.disable
 def toggle_grad_requires(model, niter, verbose):
     """Toggle requires_grad based on start iteration for each optimizable tensor."""
     start_iter_dict = model.start_iter
@@ -742,6 +775,7 @@ def compute_loss(batch, model, model_instance, loss_fn, acc=None):
     
     return loss_batch, losses
 
+@torch.compiler.disable
 def loss_logger(batch_losses, niter, iter_t, verbose=True):
     """
     Logs and summarizes the loss values for an iteration during the ptychographic reconstruction.
@@ -881,6 +915,7 @@ def optuna_objective(trial, params, init, loss_fn, constraint_fn, device='cuda',
     grad_accumulation = recon_params['BATCH_SIZE'].get("grad_accumulation", 1)
     output_dir        = recon_params['output_dir']
     selected_figs     = recon_params['selected_figs']
+    compiler_configs  = parse_torch_compile_configs(recon_params['compiler_configs'])
     
     # Parse the hypertune_params
     hypertune_params  = params['hypertune_params']
@@ -967,12 +1002,17 @@ def optuna_objective(trial, params, init, loss_fn, constraint_fn, device='cuda',
     model         = PtychoAD(init.init_variables, params['model_params'], device=device, verbose=verbose)
     optimizer     = create_optimizer(model.optimizer_params, model.optimizable_params, verbose=verbose)
     indices, batches, output_path = prepare_recon(model, init, params)
-      
+        
+    # torch.compile options
+    vprint(f"### Setting PyTorch compiler with {compiler_configs} ###", verbose=verbose)
+    vprint(" ", verbose=verbose)
+    recon_step_compiled = torch.compile(recon_step, **compiler_configs)
+    
     # Optimization loop
     for niter in range(1, NITER+1):
         
         shuffle(batches)
-        batch_losses = recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose)
+        batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose)
 
         ## Saving intermediate results
         if SAVE_ITERS is not None and niter % SAVE_ITERS == 0:
