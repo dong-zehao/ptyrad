@@ -38,12 +38,17 @@ def multislice_forward_model_vec_all(object_patches, omode_occu, probe, H, eps=1
         forward diffraction pattern for each sample in the batch.
     """
     
+    # These .contiguous() are needed for torch.compile in Linux
+    object_patches = object_patches.contiguous()
+    probe = probe.contiguous()
+    H = H.contiguous()
+
     # Cast the object back to actual complex tensor
-    object_cplx = torch.polar(object_patches[...,0], object_patches[...,1]) # (N, omode, Nz, Ny, Nx)
+    object_cplx = torch.polar(object_patches[...,0], object_patches[...,1]).contiguous() # (N, omode, Nz, Ny, Nx)
     n_slices = object_cplx.shape[2]
     
     # Expand psi to include omode dimension
-    psi = probe[:, :, None, :, :] # (N, pmode, Ny, Nx) -> (N, pmode, omode, Ny, Nx)
+    psi = probe[:, :, None, :, :].contiguous() # (N, pmode, Ny, Nx) -> (N, pmode, omode, Ny, Nx)
 
     # Propagating each object layer using broadcasting
     for n in range(n_slices-1):

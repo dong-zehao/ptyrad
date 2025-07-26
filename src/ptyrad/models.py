@@ -6,7 +6,7 @@ import torch.nn as nn
 from torchvision.transforms.functional import gaussian_blur
 
 from ptyrad.forward import multislice_forward_model_vec_all
-from ptyrad.utils import imshift_batch, vprint
+from ptyrad.utils import imshift_batch, torch_phasor, vprint
 
 # The obj_ROI_grid is modified from precalculation to on-the-fly generation for memory consumption
 # It has very little performance impact but saves lots of memory for large 4D-STEM data
@@ -309,16 +309,16 @@ class PtychoAD(torch.nn.Module):
             if self.change_thickness is True:
                 k           = 2 * torch.pi / self.lambd
                 Ky, Kx      = self.propagator_grid
-                H_opt_dz    = torch.fft.ifftshift(torch.exp(1j * dz * torch.sqrt(k ** 2 - Kx ** 2 - Ky ** 2))) # H has zero frequency at the corner in k-space
+                H_opt_dz    = torch.fft.ifftshift(torch_phasor(dz * torch.sqrt(k ** 2 - Kx ** 2 - Ky ** 2))) # H has zero frequency at the corner in k-space
                 phase_shift = 2 * torch.pi * dz * (Kyt * torch.tan(tilts_y) + Kxt * torch.tan(tilts_x)) # phase_shift is (N,Ky,Kx)
-                return H_opt_dz * torch.exp(1j*phase_shift)
+                return H_opt_dz * torch_phasor(phase_shift)
 
             else: # self.change_thickness is False
 
                 # Thickness is fixed, but obj_tilts is optimizing throughout the iterations
                 if self.lr_params['obj_tilts'] != 0:
                     phase_shift = 2 * torch.pi * dz * (Kyt * torch.tan(tilts_y) + Kxt * torch.tan(tilts_x))
-                    return self.H * torch.exp(1j*phase_shift)
+                    return self.H * torch_phasor(phase_shift)
 
                 # Thickness is fixed, but obj_tilts is a fixed non-zero value throughout the iterations, so it should only be calculated once
                 else:
@@ -326,7 +326,7 @@ class PtychoAD(torch.nn.Module):
                         return self.H_fixed_tilts
                     except AttributeError:
                         phase_shift = 2 * torch.pi * dz * (Kyt * torch.tan(tilts_y) + Kxt * torch.tan(tilts_x))
-                        self.H_fixed_tilts = self.H * torch.exp(1j*phase_shift)
+                        self.H_fixed_tilts = self.H * torch_phasor(phase_shift)
                     return self.H_fixed_tilts
         
         else: # self.tilt is False
@@ -335,7 +335,7 @@ class PtychoAD(torch.nn.Module):
                 # Thickness can be optimized, but tilt is fixed at 0
                 k        = 2 * torch.pi / self.lambd
                 Ky, Kx   = self.propagator_grid
-                H_opt_dz = torch.fft.ifftshift(torch.exp(1j * dz * torch.sqrt(k ** 2 - Kx ** 2 - Ky ** 2))) # H has zero frequency at the corner in k-space
+                H_opt_dz = torch.fft.ifftshift(torch_phasor(dz * torch.sqrt(k ** 2 - Kx ** 2 - Ky ** 2))) # H has zero frequency at the corner in k-space
                 return H_opt_dz[None,]
             
             else: # self.change_thickness is False and self.tilt_obj is False:

@@ -177,6 +177,10 @@ def print_system_info():
             vprint(f"CUDA Available: {torch.cuda.is_available()}")
             vprint(f"CUDA Version: {torch.version.cuda}")
             vprint(f"Available CUDA GPUs: {[torch.cuda.get_device_name(d) for d in range(torch.cuda.device_count())]}")
+            vprint(f"CUDA Compute Capability: {[f'{major}.{minor}' for (major, minor) in [torch.cuda.get_device_capability(d) for d in range(torch.cuda.device_count())]]}")
+            vprint("  INFO: For torch.compile with Triton, you'll need CUDA GPU with Compute Capability >= 7.0.")
+            vprint("        In addition, Triton does not directly support Windows.")
+            vprint("        For Windows users, please follow the instruction and download `triton-windows` from https://github.com/woct0rdho/triton-windows.")
         elif torch.backends.mps.is_built() and torch.backends.mps.is_available():
             vprint(f"MPS Available: {torch.backends.mps.is_available()}")
         elif torch.backends.cuda.is_built() or torch.backends.mps.is_built():
@@ -266,6 +270,7 @@ def set_gpu_device(gpuid=0):
     vprint(" ")
     return device
 
+@torch.compiler.disable
 def vprint(*args, verbose=True, **kwargs):
     """Verbose print/logging with individual control, only for rank 0 in DDP."""
     if verbose and (not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0):
@@ -322,6 +327,7 @@ def get_date(date_format='%Y%m%d'):
     # Otherwise, just return the date
     return date.today().strftime(date_format)
 
+@torch.compiler.disable
 def time_sync():
     # PyTorch doesn't have a direct exposed API to check the selected default device 
     # so we'll be checking these .is_available() just to prevent error.
