@@ -606,7 +606,7 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     # Optimization loop
     for niter in range(1,NITER+1):
         
-        batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose, acc=acc)
+        batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose, acc=acc, start_iter_t=time_sync())
         
         # Only log the main process
         if acc is None or acc.is_main_process:
@@ -628,7 +628,7 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     vprint(f"### Finished {NITER} iterations, averaged iter_t = {np.mean(model_instance.iter_times):.5g} with std = {np.std(model_instance.iter_times):.3f} ###", verbose=verbose)
     vprint(" ", verbose=verbose)
 
-def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=True, acc=None):
+def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=True, acc=None, start_iter_t=None):
     """
     Performs one iteration (or step) of the ptychographic reconstruction in the optimization loop.
 
@@ -658,7 +658,6 @@ def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint
             - iter_t (float): The total time taken to complete the iteration.
     """
     batch_losses = {name: [] for name in loss_fn.loss_params.keys()}
-    start_iter_t = time_sync()
     
     # Use the method on the wrapped model (DDP) if it exists
     model_instance = model.module if hasattr(model, "module") else model
