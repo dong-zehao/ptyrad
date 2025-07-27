@@ -146,7 +146,7 @@ def print_system_info():
     import importlib.metadata
     import os
     import platform
-    # import sys
+    import sys
     
     vprint("### System information ###")
     
@@ -204,8 +204,8 @@ def print_system_info():
         vprint("No GPU information because PyTorch can't be imported")
     
     # Python version and executable
-    # vprint(f"Python Executable: {sys.executable}")
-    # vprint(f"Python Version: {sys.version}")
+    vprint(f"Python Executable: {sys.executable}")
+    vprint(f"Python Version: {sys.version}")
     
     # Print package versions
     packages = [
