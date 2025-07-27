@@ -605,6 +605,7 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     
     # Optimization loop
     for niter in range(1,NITER+1):
+
         start_iter_t = time_sync()
         batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose, acc=acc, start_iter_t=start_iter_t)
         end_iter_t = time_sync()
@@ -612,7 +613,6 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
         remain_t = (NITER - niter) * (end_iter_t - start_iter_t)
         time_str = parse_sec_to_time_str(remain_t)
         vprint(f"Estimated remaining time: {time_str} ", verbose=verbose)
-
         
         # Only log the main process
         if acc is None or acc.is_main_process:
