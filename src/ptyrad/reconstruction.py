@@ -605,8 +605,14 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     
     # Optimization loop
     for niter in range(1,NITER+1):
-        
-        batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose, acc=acc, start_iter_t=time_sync())
+        start_iter_t = time_sync()
+        batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose, acc=acc, start_iter_t=start_iter_t)
+        end_iter_t = time_sync()
+
+        remain_t = (NITER - niter) * (end_iter_t - start_iter_t)
+        time_str = parse_sec_to_time_str(remain_t)
+        vprint(f"Estimated remaining time: {time_str} ", verbose=verbose)
+
         
         # Only log the main process
         if acc is None or acc.is_main_process:
@@ -768,7 +774,7 @@ def toggle_grad_requires(model, niter, verbose):
         # Store mask for manual gradient masking
         model._grad_mask[param_name] = should_optimize
         
-        vprint(f"Iter: {niter}, {param_name}.requires_grad = True (masked: {should_optimize})", verbose=verbose)
+        vprint(f"Iter: {niter}, {param_name}.requires_grad = True (Optimized after masking: {should_optimize})", verbose=verbose)
 
 def apply_grad_mask(model):
     """Apply gradient masking based on the stored mask."""
