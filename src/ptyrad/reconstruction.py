@@ -605,8 +605,14 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     
     # Optimization loop
     for niter in range(1,NITER+1):
-        
-        batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose, acc=acc, start_iter_t=time_sync())
+
+        start_iter_t = time_sync()
+        batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose, acc=acc, start_iter_t=start_iter_t)
+        end_iter_t = time_sync()
+
+        remain_t = (NITER - niter) * (end_iter_t - start_iter_t)
+        time_str = parse_sec_to_time_str(remain_t)
+        vprint(f"Estimated remaining time: {time_str} ", verbose=verbose)
         
         # Only log the main process
         if acc is None or acc.is_main_process:
@@ -663,11 +669,11 @@ def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint
     model_instance = model.module if hasattr(model, "module") else model
     
     # Toggle the grad calculation to disable AD update on tensors before certain iteration
+    # This now sets up gradient masking instead of changing requires_grad
     toggle_grad_requires(model_instance, niter, verbose)
     
     # Run the iteration with closure for LBFGS optimizer
     if isinstance(optimizer, torch.optim.LBFGS):
-
         # Make nested list of batches for the closure with internal grad accumulation over mini-batches
         num_batch = len(batches)
         batch_indices = np.arange(num_batch)
@@ -686,6 +692,7 @@ def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint
                 total_loss += loss_batch # LBFGS uses the returned loss to perform the line-search so it's better to return the loss that's associated to all the batches
             total_loss = total_loss / len(accu_batch_idx)
             acc.backward(total_loss) if acc is not None else total_loss.backward()
+            apply_grad_mask(model_instance) # Apply gradient masking after backward pass
             return total_loss, losses
         
         # Iterate through all accumulated batches. accu_batches = [[batch1],[batch2],[batch3]...], batches = [[accu_batches1],[accu_batches2],[accu_batches3]...]
@@ -722,6 +729,7 @@ def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint
                 
             # Perform the optimizer step when batch_idx + 1 is divisible by grad_accumulation or it's the last batch
             if (batch_idx + 1) % grad_accumulation == 0 or (batch_idx + 1) == len(batches):
+                apply_grad_mask(model_instance) # Apply gradient masking before the optimizer step
                 if acc is not None:
                     acc.wait_for_everyone()
                 optimizer.step() 
@@ -747,18 +755,36 @@ def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint
         model_instance.avg_tilt_iters.append((niter, model_instance.opt_obj_tilts.detach().mean(0).cpu().numpy()))
     return batch_losses
 
-# TODO Need to find a workaround to enable this grad toggle during torch.compile
-# This is ignored by torch.compile because torch.compile will only compile the graph given the 1st iteration
-# One solution would be to calculate grads for all tensors and manually mask it, but this is a bit wasteful
-torch.compiler.disable
+# Calculate grads for all tensors and manually mask it, but this is a bit wasteful
 def toggle_grad_requires(model, niter, verbose):
     """Toggle requires_grad based on start iteration for each optimizable tensor."""
     start_iter_dict = model.start_iter
     optimizable_tensors = model.optimizable_tensors
+    
+    # Store the mask for later use in optimizer step
+    model._grad_mask = {}
+    
     for param_name, start_iter in start_iter_dict.items():
-        requires_grad = start_iter is not None and niter >= start_iter
-        optimizable_tensors[param_name].requires_grad = requires_grad
-        vprint(f"Iter: {niter}, {param_name}.requires_grad = {requires_grad}", verbose=verbose)
+        should_optimize = start_iter is not None and niter >= start_iter
+        
+        # Always keep requires_grad=True for JIT compatibility
+        # This ensures the computation graph remains static across iterations
+        optimizable_tensors[param_name].requires_grad = True
+        
+        # Store mask for manual gradient masking
+        model._grad_mask[param_name] = should_optimize
+        
+        vprint(f"Iter: {niter}, {param_name}.requires_grad = True (Optimized after masking: {should_optimize})", verbose=verbose)
+
+def apply_grad_mask(model):
+    """Apply gradient masking based on the stored mask."""
+    if hasattr(model, '_grad_mask'):
+        for param_name, should_optimize in model._grad_mask.items():
+            if not should_optimize:
+                tensor = model.optimizable_tensors[param_name]
+                if tensor.grad is not None:
+                    # Zero out the gradient for parameters that shouldn't be optimized
+                    tensor.grad.zero_()
 
 def compute_loss(batch, model, model_instance, loss_fn, acc=None):
     """Compute the model output and loss, with optional support for accelerate's autocast."""
