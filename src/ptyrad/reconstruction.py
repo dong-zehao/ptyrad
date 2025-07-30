@@ -30,6 +30,7 @@ from ptyrad.visualization import plot_pos_grouping, plot_summary
 # Consider setting `torch.set_float32_matmul_precision('high')` for better performance.'
 # Although I didn't see much effect on performance because there's very little matrix multiplication in PtyRAD.
 torch.set_float32_matmul_precision('high') 
+torch._dynamo.config.cache_size_limit = 32
 
 # The actual performance is significantly better than 'eager' so I supress this for clarity
 warnings.filterwarnings(
