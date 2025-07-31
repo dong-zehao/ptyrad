@@ -16,3 +16,4 @@ dependencies:
   - scipy
   - tifffile
   - torchvision
+  - numba
