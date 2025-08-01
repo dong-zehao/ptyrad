@@ -227,7 +227,7 @@ def load_pt(file_path, weights_only=False):
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"The specified file '{file_path}' does not exist.")
 
-    data = torch.load(file_path, weights_only=weights_only) 
+    data = torch.load(file_path, weights_only=weights_only, map_location='cpu')
     # The default behavior of torch.load is `weights_only=True` since PyTorch 2.6 (2025.01.29)
     # https://dev-discuss.pytorch.org/t/bc-breaking-change-torch-load-is-being-flipped-to-use-weights-only-true-by-default-in-the-nightlies-after-137602/2573
     # Because PtyRAD .pt isn't a true PyTorch model, so `weights_only=True` would break this critical loading function.
