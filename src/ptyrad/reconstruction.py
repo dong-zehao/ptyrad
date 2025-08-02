@@ -610,6 +610,10 @@ def recon_loop(model, init, params, optimizer, scheduler, loss_fn, constraint_fn
 
         start_iter_t = time_sync()
         batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose, acc=acc, start_iter_t=start_iter_t)
+        end_iter_t = time_sync()
+        remain_t = (NITER - niter) * (end_iter_t - start_iter_t)
+        time_str = parse_sec_to_time_str(remain_t)
+        vprint(f"Iter: {niter}, Estimated remaining time: {time_str} ", verbose=verbose)
         
         # Only log the main process
         if acc is None or acc.is_main_process:
@@ -629,12 +633,9 @@ def recon_loop(model, init, params, optimizer, scheduler, loss_fn, constraint_fn
     
         if scheduler is not None:
             scheduler.step()
-            vprint(f"Iter: {niter}, learning rate is {optimizer.param_groups[1]['lr']:.3g} for object phase", verbose=verbose)
+            current_lr = scheduler.get_last_lr()[1]  # Get the current learning rate from the scheduler
+            vprint(f"Iter: {niter}, learning rate is {current_lr:.3g} for object phase", verbose=verbose)
 
-        end_iter_t = time_sync()
-        remain_t = (NITER - niter) * (end_iter_t - start_iter_t)
-        time_str = parse_sec_to_time_str(remain_t)
-        vprint(f"Iter: {niter}, Estimated remaining time: {time_str} ", verbose=verbose)
         vprint(f" ", verbose=verbose)
         
     model_instance = model.module if hasattr(model, "module") else model
