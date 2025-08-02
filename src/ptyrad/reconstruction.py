@@ -38,20 +38,6 @@ warnings.filterwarnings(
     message="Torchinductor does not support code generation for complex operators. Performance may be worse than eager."
 )
 
-# Filter out Graph break warnings from torch._dynamo
-warnings.filterwarnings(
-    "ignore",
-    message="Graph break due to unsupported builtin sys._getframe.*",
-    module="torch._dynamo.variables.functions"
-)
-
-# Filter out Profiler function warnings from torch._logging
-warnings.filterwarnings(
-    "ignore",
-    message=".*Profiler function.*will be ignored",
-    module="torch._logging._internal"
-)
-
 torch._dynamo.config.cache_size_limit = 32
 
 class PtyRADSolver(object):
