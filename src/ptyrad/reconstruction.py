@@ -38,6 +38,20 @@ warnings.filterwarnings(
     message="Torchinductor does not support code generation for complex operators. Performance may be worse than eager."
 )
 
+# Filter out Graph break warnings from torch._dynamo
+warnings.filterwarnings(
+    "ignore",
+    message="Graph break due to unsupported builtin sys._getframe.*",
+    module="torch._dynamo.variables.functions"
+)
+
+# Filter out Profiler function warnings from torch._logging
+warnings.filterwarnings(
+    "ignore",
+    message=".*Profiler function.*will be ignored",
+    module="torch._logging._internal"
+)
+
 torch._dynamo.config.cache_size_limit = 32
 
 class PtyRADSolver(object):
@@ -595,6 +609,7 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
         remain_t = (NITER - niter) * (end_iter_t - start_iter_t)
         time_str = parse_sec_to_time_str(remain_t)
         vprint(f"Estimated remaining time: {time_str} ", verbose=verbose)
+        vprint(f" ", verbose=verbose)
         
         # Only log the main process
         if acc is None or acc.is_main_process:
@@ -723,8 +738,9 @@ def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint
                 acc.wait_for_everyone()
             for loss_name, loss_value in zip(loss_fn.loss_params.keys(), losses):
                 batch_losses[loss_name].append(loss_value.detach().cpu().numpy())
-            if batch_idx in np.linspace(0, len(batches)-1, num=6, dtype=int):
-                vprint(f"Done batch {batch_idx+1} with {len(batch)} indices ({batch[:5].tolist()}...) in {batch_t:.3f} sec", verbose=verbose)
+            # Suppress verbose for better torch.compile performance
+            # if batch_idx in np.linspace(0, len(batches)-1, num=6, dtype=int):
+            #     vprint(f"Done batch {batch_idx+1} with {len(batch)} indices ({batch[:5].tolist()}...) in {batch_t:.3f} sec", verbose=verbose)
     
     constraint_fn(model_instance, niter)
     
@@ -756,7 +772,8 @@ def toggle_grad_requires(model, niter, verbose):
         # Store mask for manual gradient masking
         model._grad_mask[param_name] = should_optimize
         
-        vprint(f"Iter: {niter}, {param_name}.requires_grad = True (Optimized after masking: {should_optimize})", verbose=verbose)
+        # Suppress verbose output for torch.compile performance
+        # vprint(f"Iter: {niter}, {param_name}.requires_grad = True (Optimized after masking: {should_optimize})", verbose=verbose)
 
 def apply_grad_mask(model):
     """Apply gradient masking based on the stored mask."""
