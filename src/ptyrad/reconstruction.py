@@ -738,9 +738,8 @@ def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint
                 acc.wait_for_everyone()
             for loss_name, loss_value in zip(loss_fn.loss_params.keys(), losses):
                 batch_losses[loss_name].append(loss_value.detach().cpu().numpy())
-            # Suppress verbose for better torch.compile performance
-            # if batch_idx in np.linspace(0, len(batches)-1, num=6, dtype=int):
-            #     vprint(f"Done batch {batch_idx+1} with {len(batch)} indices ({batch[:5].tolist()}...) in {batch_t:.3f} sec", verbose=verbose)
+            if batch_idx in np.linspace(0, len(batches)-1, num=6, dtype=int):
+                vprint(f"Done batch {batch_idx+1} with {len(batch)} indices ({batch[:5].tolist()}...) in {batch_t:.3f} sec", verbose=verbose)
     
     constraint_fn(model_instance, niter)
     
@@ -772,8 +771,7 @@ def toggle_grad_requires(model, niter, verbose):
         # Store mask for manual gradient masking
         model._grad_mask[param_name] = should_optimize
         
-        # Suppress verbose output for torch.compile performance
-        # vprint(f"Iter: {niter}, {param_name}.requires_grad = True (Optimized after masking: {should_optimize})", verbose=verbose)
+        vprint(f"Iter: {niter}, {param_name}.requires_grad = True (Optimized after masking: {should_optimize})", verbose=verbose)
 
 def apply_grad_mask(model):
     """Apply gradient masking based on the stored mask."""
