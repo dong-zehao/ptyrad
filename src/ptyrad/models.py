@@ -34,6 +34,7 @@ class PtychoAD(torch.nn.Module):
         detector_blur_std (float): Standard deviation for detector blur, or None if no blur.
         obj_preblur_std (float): Standard deviation for object pre-blur, or None if no pre-blur.
         lr_params (dict): Learning rate parameters for optimizable tensors.
+        wd_params (dict): Weight decay parameters for optimizable tensors.
         opt_obja (torch.Tensor): Amplitude of the object.
         opt_objp (torch.Tensor): Phase of the object.
         opt_obj_tilts (torch.Tensor): Tilts of the object.
@@ -97,16 +98,19 @@ class PtychoAD(torch.nn.Module):
                 self.meas_padded        = None
             self.meas_scale_factors     = init_variables.get('on_the_fly_meas_scale_factors', None)
 
-            # Parse the learning rate and start iter for optimizable tensors
+            # Parse the learning rate, start iter and weight decay for optimizable tensors
             start_iter_dict = {}
             lr_dict = {}
+            wd_dict = {}
             for key, params in model_params['update_params'].items():
                 start_iter_dict[key] = params['start_iter']
                 lr_dict[key] = params['lr']
+                wd_dict[key] = params.get('weight_decay', 0.0)
             self.optimizer_params       = model_params['optimizer_params']
             self.start_iter             = start_iter_dict
             self.lr_params              = lr_dict
-            
+            self.wd_params              = wd_dict
+
             # Optimizable parameters
             self.opt_obja               = nn.Parameter(torch.abs(torch.tensor(init_variables['obj'],    device=device)).to(torch.float32))
             self.opt_objp               = nn.Parameter(torch.angle(torch.tensor(init_variables['obj'],  device=device)).to(torch.float32))
@@ -148,7 +152,7 @@ class PtychoAD(torch.nn.Module):
                 'slice_thickness' : self.opt_slice_thickness,
                 'probe'           : self.opt_probe,
                 'probe_pos_shifts': self.opt_probe_pos_shifts}
-            self.create_optimizable_params_dict(self.lr_params, self.verbose)
+            self.create_optimizable_params_dict(self.lr_params, self.wd_params, self.verbose)
 
             vprint('### Done initializing PtychoAD model ###', verbose=verbose)
             vprint(' ', verbose=verbose)
@@ -196,9 +200,9 @@ class PtychoAD(torch.nn.Module):
         self.rpx_grid = rpx
         self.roy_grid = roy # real space grid with y-indices spans across object extent
         self.rox_grid = rox
-    
-    def create_optimizable_params_dict(self, lr_params, verbose=True):
-        """ Sets the optimizer with lr_params """
+
+    def create_optimizable_params_dict(self, lr_params, wd_params, verbose=True):
+        """ Sets the optimizer with lr_params and wd_params"""
         # # Use this to edit learning rate if needed some refinement
 
         # model.set_optimizer(lr_params={'obja'            : 5e-4,
@@ -209,6 +213,7 @@ class PtychoAD(torch.nn.Module):
         # optimizer=torch.optim.Adam(model.optimizer_params)
         
         self.lr_params = lr_params
+        self.wd_params = wd_params
         self.optimizable_params = []
         for param_name, lr in lr_params.items():
             if param_name not in self.optimizable_tensors:
@@ -216,7 +221,7 @@ class PtychoAD(torch.nn.Module):
             else:
                 self.optimizable_tensors[param_name].requires_grad = (lr != 0) # Set requires_grad based on learning rate
                 if lr != 0:
-                    self.optimizable_params.append({'params': [self.optimizable_tensors[param_name]], 'lr': lr})               
+                    self.optimizable_params.append({'params': [self.optimizable_tensors[param_name]], 'lr': lr, 'weight_decay': wd_params.get(param_name, 0.0)})
         if verbose:
             self.print_model_summary()
         
@@ -224,7 +229,7 @@ class PtychoAD(torch.nn.Module):
         # Set all the print as vprint so that it'll only print once in DDP, the actual `if verbose` is set outside of the function
         vprint('### PtychoAD optimizable variables ###')
         for name, tensor in self.optimizable_tensors.items():
-            vprint(f"{name.ljust(16)}: {str(tensor.shape).ljust(32)}, {str(tensor.dtype).ljust(16)}, device:{tensor.device}, grad:{str(tensor.requires_grad).ljust(5)}, lr:{self.lr_params[name]:.0e}")
+            vprint(f"{name.ljust(16)}: {str(tensor.shape).ljust(32)}, {str(tensor.dtype).ljust(16)}, device:{tensor.device}, grad:{str(tensor.requires_grad).ljust(5)}, lr:{self.lr_params[name]:.0e}, weight_decay:{self.wd_params.get(name, 0.0):.0e}")
         total_var = sum(tensor.numel() for _, tensor in self.optimizable_tensors.items() if tensor.requires_grad)
         # When you create a new model, make sure to pass the optimizer_params to optimizer using "optimizer = torch.optim.Adam(model.optimizer_params)"
         vprint(" ")        

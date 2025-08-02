@@ -38,6 +38,7 @@ def make_save_dict(output_path, model, params, optimizer, niter, indices, batch_
                      'obj_preblur_std'  : model.obj_preblur_std,
                      'start_iter'       : model.start_iter,
                      'lr_params'        : model.lr_params,
+                     'wd_params'        : model.wd_params,
                      'omode_occu'       : model.omode_occu,
                      'H'                : model.H,
                      'N_scan_slow'      : model.N_scan_slow,
