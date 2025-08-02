@@ -31,13 +31,28 @@ from ptyrad.visualization import plot_pos_grouping, plot_summary
 # Consider setting `torch.set_float32_matmul_precision('high')` for better performance.'
 # Although I didn't see much effect on performance because there's very little matrix multiplication in PtyRAD.
 torch.set_float32_matmul_precision('high') 
-torch._dynamo.config.cache_size_limit = 32
 
 # The actual performance is significantly better than 'eager' so I supress this for clarity
 warnings.filterwarnings(
     "ignore",
     message="Torchinductor does not support code generation for complex operators. Performance may be worse than eager."
 )
+
+# Filter out Graph break warnings from torch._dynamo
+warnings.filterwarnings(
+    "ignore",
+    message="Graph break due to unsupported builtin sys._getframe.*",
+    module="torch._dynamo.variables.functions"
+)
+
+# Filter out Profiler function warnings from torch._logging
+warnings.filterwarnings(
+    "ignore",
+    message=".*Profiler function.*will be ignored",
+    module="torch._logging._internal"
+)
+
+torch._dynamo.config.cache_size_limit = 32
 
 class PtyRADSolver(object):
     """
