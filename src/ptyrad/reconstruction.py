@@ -634,7 +634,7 @@ def recon_loop(model, init, params, optimizer, scheduler, loss_fn, constraint_fn
         if scheduler is not None:
             scheduler.step()
             current_lr = scheduler.get_last_lr()[1]  # Get the current learning rate from the scheduler
-            vprint(f"Iter: {niter}, learning rate is {current_lr:.3g} for object phase", verbose=verbose)
+            vprint(f"Iter: {niter}, learning rate is {current_lr:.3e} for object phase", verbose=verbose)
 
         vprint(f" ", verbose=verbose)
         
