@@ -167,13 +167,9 @@ class PtyRADSolver(object):
         if logger is not None and logger.flush_file:
             logger.flush_to_file(log_dir=output_path) # Note that output_path can be None, and there's an internal flag of self.flush_file controls the actual file creation
 
-        # create the scheduler if CosinesAnnealingLR is enabled for test purpose, which may be later added as a hyperparameter
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=params['recon_params']['NITER'], eta_min=1e-5, last_epoch=-1) if params['model_params']['CosinesAnnealingLR']['enable'] else None
-
-        recon_loop(model, self.init, params, optimizer, scheduler, self.loss_fn, self.constraint_fn, indices, batches, output_path, acc=self.accelerator)
+        recon_loop(model, self.init, params, optimizer, self.loss_fn, self.constraint_fn, indices, batches, output_path, acc=self.accelerator)
         self.reconstruct_results = model
         self.optimizer = optimizer
-        self.scheduler = scheduler
     
     def hypertune(self):
         import optuna
@@ -554,7 +550,7 @@ def parse_torch_compile_configs(configs):
         configs['disable'] = not configs.pop('enable')
     return configs
 
-def recon_loop(model, init, params, optimizer, scheduler, loss_fn, constraint_fn, indices, batches, output_path, acc=None):
+def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, batches, output_path, acc=None):
     """
     Executes the iterative optimization loop for ptychographic reconstruction.
 
@@ -572,7 +568,6 @@ def recon_loop(model, init, params, optimizer, scheduler, loss_fn, constraint_fn
             process, including experimental parameters, source parameters, loss parameters, 
             constraint parameters, and reconstruction settings.
         optimizer (torch.optim.Optimizer): The optimizer used to update the model parameters.
-        scheduler (torch.optim.lr_scheduler): The learning rate scheduler for the optimizer.
         loss_fn (CombinedLoss): The loss function object used to compute the loss during 
             each iteration.
         constraint_fn (CombinedConstraint): The constraint function object applied during 
@@ -631,11 +626,6 @@ def recon_loop(model, init, params, optimizer, scheduler, loss_fn, constraint_fn
                     ## Saving summary
                     plot_summary(output_path, model_instance, niter, indices, init_variables, selected_figs=selected_figs, show_fig=False, save_fig=True, verbose=verbose)
     
-        if scheduler is not None:
-            scheduler.step()
-            current_lr = scheduler.get_last_lr()[1]  # Get the current learning rate from the scheduler
-            vprint(f"Iter: {niter}, learning rate is {current_lr:.3e} for object phase", verbose=verbose)
-
         vprint(f" ", verbose=verbose)
         
     model_instance = model.module if hasattr(model, "module") else model
