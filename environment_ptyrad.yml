@@ -9,11 +9,12 @@ dependencies:
   - jupyter
   - matplotlib
   - optuna
-  - python
-  - pytorch
+  - python=3.12
+  - pytorch=3.5.1
   - pytorch-cuda
   - scikit-learn
   - scipy
   - tifffile
   - torchvision
+
   - numba
