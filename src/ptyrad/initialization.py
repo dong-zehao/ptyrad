@@ -224,7 +224,10 @@ class Initializer:
         vprint("### Initializing probe positions ###", verbose=self.verbose)
     
         pos = self._load_pos()
-        pos = self._process_pos(pos)
+        pos = self._pos_scan_flipT(pos, self.init_params.get('pos_scan_flipT'))
+        pos_pre_affine = pos.copy()
+        pos = self._pos_scan_affine_transform(pos, self.init_params.get('pos_scan_affine'))
+        pos = self._pos_scan_add_random_displacement(pos, self.init_params.get('pos_scan_rand_std'))
 
         probe_shape = self.init_variables['probe_shape']
         obj_lateral_extent = (1.2 * np.ceil(pos.max(0) - pos.min(0) + probe_shape)).astype(int)
@@ -236,6 +239,7 @@ class Initializer:
         self.init_variables['crop_pos'] = crop_pos
         self.init_variables['probe_pos_shifts'] = probe_pos_shifts
         self.init_variables['scan_affine'] = self.init_params['pos_scan_affine']
+        self.init_variables['pos_pre_affine'] = pos_pre_affine
     
         # Print summary
         vprint(f"crop_pos                                (N,2) = {crop_pos.dtype}, {crop_pos.shape}", verbose=self.verbose)

@@ -7,6 +7,7 @@ import torch
 from tifffile import imwrite
 
 from ptyrad.utils import get_date, normalize_by_bit_depth, vprint
+from ptyrad.utils.math_ops import decompose_affine_matrix
 
 
 def make_save_dict(output_path, model, params, optimizer, niter, indices, batch_losses):
@@ -298,7 +299,14 @@ def copy_params_to_dir(params_path, output_dir, params=None, verbose=True):
         vprint("### Warning: No params file found and no params dictionary provided. Skipping. ###", verbose=verbose)
 
 @torch.compiler.disable
-def save_results(output_path, model, params, optimizer, niter, indices, batch_losses, collate_str=''):
+def _fit_scan_affine(init_pos, final_pos):
+    init_centered = init_pos - init_pos.mean(0)
+    final_centered = final_pos - final_pos.mean(0)
+    affine_mat, _, _, _ = np.linalg.lstsq(init_centered, final_centered, rcond=None)
+    scale, asymmetry, rotation, shear = decompose_affine_matrix(affine_mat)
+    return affine_mat, (scale, asymmetry, rotation, shear)
+
+def save_results(output_path, model, params, optimizer, niter, indices, batch_losses, collate_str='', init_variables=None):
     
     save_result_list = params['recon_params'].get('save_result', ['model', 'obj', 'probe'])
     result_modes = params['recon_params'].get('result_modes')
@@ -320,6 +328,35 @@ def save_results(output_path, model, params, optimizer, niter, indices, batch_lo
     crop_pos   = model.crop_pos[indices].detach().cpu().numpy() + np.array(probe.shape[-2:])//2
     y_min, y_max = crop_pos[:,0].min(), crop_pos[:,0].max()
     x_min, x_max = crop_pos[:,1].min(), crop_pos[:,1].max()
+
+    # fit affine matrix and parameters if initial positions are provided
+    scan_positions = (model.crop_pos + model.opt_probe_pos_shifts).detach().cpu().numpy()
+    affine_mat = None
+    fitted_affine = None
+    fit_pos_source = None
+    if init_variables is not None:
+        if 'pos_pre_affine' in init_variables:
+            init_pos = init_variables['pos_pre_affine']
+            fit_pos_source = 'pos_pre_affine'
+        else:
+            init_pos = init_variables['crop_pos'] + init_variables['probe_pos_shifts']
+            fit_pos_source = 'init_positions'
+        try:
+            affine_mat, fitted_affine = _fit_scan_affine(init_pos, scan_positions)
+        except Exception:
+            affine_mat = None
+            fitted_affine = None
+    # Save scan positions with header info
+    positions_path = os.path.join(output_path, f"scan_positions{collate_str}{iter_str}.csv")
+    header_lines = ["columns: y,x (row index corresponds to scan index)"]
+    if fitted_affine is not None:
+        scale, asymmetry, rotation, shear = fitted_affine
+        header_lines.insert(0, f"best_pos_scan_affine (scale, asymmetry, rotation_deg, shear_deg): {scale:.6g}, {asymmetry:.6g}, {rotation:.6g}, {shear:.6g}")
+    if affine_mat is not None:
+        header_lines.insert(1, f"affine_matrix: {affine_mat[0,0]:.6g}, {affine_mat[0,1]:.6g}; {affine_mat[1,0]:.6g}, {affine_mat[1,1]:.6g}")
+    if fit_pos_source is not None:
+        header_lines.insert(2, f"fit_source: {fit_pos_source}")
+    np.savetxt(positions_path, scan_positions, delimiter=",", header="\n".join(header_lines), comments="# ", fmt="%.6f")
     
     for bit in result_modes['bit']:
         if bit == '8':
