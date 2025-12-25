@@ -315,7 +315,7 @@ def orthogonalize_modes_vec(modes, sort = False):
     modes_reshaped = modes.reshape(input_shape[0], -1) # Reshape modes to have a shape of (Nmode, X*Y)
     A = torch.matmul(modes_reshaped, modes_reshaped.H) # A = M M^T
 
-    _, evecs = torch.linalg.eig(A)
+    _, evecs = torch.linalg.eigh(A)
    
     # Matrix-multiplication version (N,N) @ (N,YX) = (N,YX)
     ortho_modes = torch.matmul(evecs.H, modes_reshaped).reshape(input_shape)
