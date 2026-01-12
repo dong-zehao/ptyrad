@@ -552,7 +552,7 @@ def parse_torch_compile_configs(configs):
     configs.setdefault('dynamic', True)
     if configs.get('dynamic'):
         torch._dynamo.config.dynamic_shapes = True
-        torch._dynamo.config.assume_static_by_default = False
+        torch._dynamo.config.assume_static_by_default = True
     else:
         torch._dynamo.config.dynamic_shapes = False
     return configs
