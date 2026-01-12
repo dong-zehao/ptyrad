@@ -546,9 +546,22 @@ def parse_torch_compile_configs(configs):
         The params.yaml defines as 'enable': bool = False, 
         while torch.compile takes only 'disable': bool, so a conversion is needed.
     """
+    configs = deepcopy(configs) if configs is not None else {}
     if 'enable' in configs:
         configs['disable'] = not configs.pop('enable')
+    configs.setdefault('dynamic', True)
+    if configs.get('dynamic'):
+        torch._dynamo.config.dynamic_shapes = True
+        torch._dynamo.config.assume_static_by_default = False
+    else:
+        torch._dynamo.config.dynamic_shapes = False
     return configs
+
+def prepare_batch_tensor(batch, device):
+    """Convert batch indices to a tensor and mark the batch dimension as dynamic."""
+    batch_tensor = torch.as_tensor(batch, device=device, dtype=torch.long)
+    torch._dynamo.mark_dynamic(batch_tensor, 0)
+    return batch_tensor
 
 def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, batches, output_path, acc=None):
     """
@@ -590,13 +603,17 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     SAVE_ITERS        = recon_params['SAVE_ITERS']
     grad_accumulation = recon_params['BATCH_SIZE'].get("grad_accumulation", 1)
     selected_figs     = recon_params['selected_figs']
-    compiler_configs  = parse_torch_compile_configs(recon_params['compiler_configs'])
+    compiler_configs  = parse_torch_compile_configs(recon_params.get('compiler_configs', {}))
     verbose           = not recon_params['if_quiet']
     
     # torch.compile options
     vprint(f"### Setting PyTorch compiler with {compiler_configs} ###", verbose=verbose)
     vprint(" ", verbose=verbose)
-    recon_step_compiled = torch.compile(recon_step, **compiler_configs)
+    model_instance = model.module if hasattr(model, "module") else model
+    def compute_loss_batch(batch):
+        return compute_loss(batch, model, model_instance, loss_fn, acc)
+
+    compute_loss_compiled = torch.compile(compute_loss_batch, **compiler_configs)
     
     vprint("### Start the PtyRAD iterative ptycho reconstruction ###", verbose=verbose)
     
@@ -604,7 +621,19 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     for niter in range(1,NITER+1):
 
         start_iter_t = time_sync()
-        batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose, acc=acc, start_iter_t=start_iter_t)
+        batch_losses = recon_step(
+            batches,
+            grad_accumulation,
+            model,
+            optimizer,
+            loss_fn,
+            constraint_fn,
+            niter,
+            compute_loss_compiled,
+            verbose=verbose,
+            acc=acc,
+            start_iter_t=start_iter_t,
+        )
         end_iter_t = time_sync()
         remain_t = (NITER - niter) * (end_iter_t - start_iter_t)
         time_str = parse_sec_to_time_str(remain_t)
@@ -632,7 +661,19 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     vprint(f"### Finished {NITER} iterations, averaged iter_t = {np.mean(model_instance.iter_times):.5g} with std = {np.std(model_instance.iter_times):.3f} ###", verbose=verbose)
     vprint(" ", verbose=verbose)
 
-def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=True, acc=None, start_iter_t=None):
+def recon_step(
+    batches,
+    grad_accumulation,
+    model,
+    optimizer,
+    loss_fn,
+    constraint_fn,
+    niter,
+    compute_loss_fn,
+    verbose=True,
+    acc=None,
+    start_iter_t=None,
+):
     """
     Performs one iteration (or step) of the ptychographic reconstruction in the optimization loop.
 
@@ -684,9 +725,7 @@ def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint
             # Run grad accumulation inside the closure for LBFGS, note that each closure is ideally 1 full iter with grad_accu
             for batch_idx in accu_batch_idx:
                 batch = batches[batch_idx]
-                model_DP, object_patches = model(batch)
-                measured_DP = model_instance.get_measurements(batch)
-                loss_batch, losses = loss_fn(model_DP, measured_DP, object_patches, model_instance.omode_occu)
+                loss_batch, losses = compute_loss_fn(batch)
                 total_loss += loss_batch # LBFGS uses the returned loss to perform the line-search so it's better to return the loss that's associated to all the batches
             total_loss = total_loss / len(accu_batch_idx)
             acc.backward(total_loss) if acc is not None else total_loss.backward()
@@ -715,7 +754,7 @@ def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint
             start_batch_t = time_sync()
             
             # Compute forward pass and loss (wrapped in autocast if accelerate is enabled)
-            loss_batch, losses = compute_loss(batch, model, model_instance, loss_fn, acc)
+            loss_batch, losses = compute_loss_fn(batch)
             
             # Normalize the `loss_batch`` before populating the gradients
             # We only want to scale the `loss_batch` so the grad/update is scaled accordingly
@@ -786,14 +825,15 @@ def apply_grad_mask(model):
 
 def compute_loss(batch, model, model_instance, loss_fn, acc=None):
     """Compute the model output and loss, with optional support for accelerate's autocast."""
+    batch_tensor = prepare_batch_tensor(batch, model_instance.device)
     if acc is not None:
         with acc.autocast():
-            model_DP, object_patches = model(batch)
-            measured_DP = model_instance.get_measurements(batch)
+            model_DP, object_patches = model(batch_tensor)
+            measured_DP = model_instance.get_measurements(batch_tensor)
             loss_batch, losses = loss_fn(model_DP, measured_DP, object_patches, model_instance.omode_occu)
     else:
-        model_DP, object_patches = model(batch)
-        measured_DP = model_instance.get_measurements(batch)
+        model_DP, object_patches = model(batch_tensor)
+        measured_DP = model_instance.get_measurements(batch_tensor)
         loss_batch, losses = loss_fn(model_DP, measured_DP, object_patches, model_instance.omode_occu)
     
     return loss_batch, losses
@@ -938,7 +978,7 @@ def optuna_objective(trial, params, init, loss_fn, constraint_fn, device='cuda',
     grad_accumulation = recon_params['BATCH_SIZE'].get("grad_accumulation", 1)
     output_dir        = recon_params['output_dir']
     selected_figs     = recon_params['selected_figs']
-    compiler_configs  = parse_torch_compile_configs(recon_params['compiler_configs'])
+    compiler_configs  = parse_torch_compile_configs(recon_params.get('compiler_configs', {}))
     
     # Parse the hypertune_params
     hypertune_params  = params['hypertune_params']
@@ -1029,13 +1069,27 @@ def optuna_objective(trial, params, init, loss_fn, constraint_fn, device='cuda',
     # torch.compile options
     vprint(f"### Setting PyTorch compiler with {compiler_configs} ###", verbose=verbose)
     vprint(" ", verbose=verbose)
-    recon_step_compiled = torch.compile(recon_step, **compiler_configs)
+    model_instance = model.module if hasattr(model, "module") else model
+    def compute_loss_batch(batch):
+        return compute_loss(batch, model, model_instance, loss_fn)
+
+    compute_loss_compiled = torch.compile(compute_loss_batch, **compiler_configs)
     
     # Optimization loop
     for niter in range(1, NITER+1):
         
         shuffle(batches)
-        batch_losses = recon_step_compiled(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, verbose=verbose)
+        batch_losses = recon_step(
+            batches,
+            grad_accumulation,
+            model,
+            optimizer,
+            loss_fn,
+            constraint_fn,
+            niter,
+            compute_loss_compiled,
+            verbose=verbose,
+        )
 
         ## Saving intermediate results
         if SAVE_ITERS is not None and niter % SAVE_ITERS == 0:
