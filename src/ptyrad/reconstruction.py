@@ -610,8 +610,8 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     vprint(f"### Setting PyTorch compiler with {compiler_configs} ###", verbose=verbose)
     vprint(" ", verbose=verbose)
     model_instance = model.module if hasattr(model, "module") else model
-    def compute_loss_batch(batch):
-        return compute_loss(batch, model, model_instance, loss_fn, acc)
+    def compute_loss_batch(batch_tensor):
+        return compute_loss(batch_tensor, model, model_instance, loss_fn, acc)
 
     compute_loss_compiled = torch.compile(compute_loss_batch, **compiler_configs)
     
@@ -717,29 +717,30 @@ def recon_step(
         num_batch = len(batches)
         batch_indices = np.arange(num_batch)
         np.random.shuffle(batch_indices)
-        accu_batch_indices = np.array_split(batch_indices,num_batch//grad_accumulation)
-        
+        accu_batch_indices = np.array_split(batch_indices, num_batch // grad_accumulation)
+
         def closure():
             optimizer.zero_grad()
             total_loss = 0
             # Run grad accumulation inside the closure for LBFGS, note that each closure is ideally 1 full iter with grad_accu
             for batch_idx in accu_batch_idx:
                 batch = batches[batch_idx]
-                loss_batch, losses = compute_loss_fn(batch)
+                batch_tensor = prepare_batch_tensor(batch, model_instance.device)
+                loss_batch, losses = compute_loss_fn(batch_tensor)
                 total_loss += loss_batch # LBFGS uses the returned loss to perform the line-search so it's better to return the loss that's associated to all the batches
             total_loss = total_loss / len(accu_batch_idx)
             acc.backward(total_loss) if acc is not None else total_loss.backward()
             apply_grad_mask(model_instance) # Apply gradient masking after backward pass
             return total_loss, losses
-        
+
         # Iterate through all accumulated batches. accu_batches = [[batch1],[batch2],[batch3]...], batches = [[accu_batches1],[accu_batches2],[accu_batches3]...]
         for accu_batch_idx in accu_batch_indices:
             optimizer.step(lambda: closure()[0])
-            
+
         # This extra evaluation on accumulated batches is just to get the `losses` for logging purpose
         _, losses = closure()
         optimizer.zero_grad()
-        
+
         # Append losses and log batch progress
         if acc is not None:
             acc.wait_for_everyone()
@@ -754,7 +755,8 @@ def recon_step(
             start_batch_t = time_sync()
             
             # Compute forward pass and loss (wrapped in autocast if accelerate is enabled)
-            loss_batch, losses = compute_loss_fn(batch)
+            batch_tensor = prepare_batch_tensor(batch, model_instance.device)
+            loss_batch, losses = compute_loss_fn(batch_tensor)
             
             # Normalize the `loss_batch`` before populating the gradients
             # We only want to scale the `loss_batch` so the grad/update is scaled accordingly
@@ -823,9 +825,8 @@ def apply_grad_mask(model):
                     # Zero out the gradient for parameters that shouldn't be optimized
                     tensor.grad.zero_()
 
-def compute_loss(batch, model, model_instance, loss_fn, acc=None):
+def compute_loss(batch_tensor, model, model_instance, loss_fn, acc=None):
     """Compute the model output and loss, with optional support for accelerate's autocast."""
-    batch_tensor = prepare_batch_tensor(batch, model_instance.device)
     if acc is not None:
         with acc.autocast():
             model_DP, object_patches = model(batch_tensor)
@@ -1070,8 +1071,8 @@ def optuna_objective(trial, params, init, loss_fn, constraint_fn, device='cuda',
     vprint(f"### Setting PyTorch compiler with {compiler_configs} ###", verbose=verbose)
     vprint(" ", verbose=verbose)
     model_instance = model.module if hasattr(model, "module") else model
-    def compute_loss_batch(batch):
-        return compute_loss(batch, model, model_instance, loss_fn)
+    def compute_loss_batch(batch_tensor):
+        return compute_loss(batch_tensor, model, model_instance, loss_fn)
 
     compute_loss_compiled = torch.compile(compute_loss_batch, **compiler_configs)
     
