@@ -277,7 +277,8 @@ class PtychoAD(torch.nn.Module):
         if self.shift_probes:
             probes = imshift_batch(probe, shifts = self.opt_probe_pos_shifts[indices], grid = self.shift_probes_grid)
         else:
-            probes = torch.broadcast_to(probe, (len(indices), *probe.shape)) # Broadcast a batch dimension, essentially using same probe for all samples
+            batch_size = indices.shape[0]
+            probes = torch.broadcast_to(probe, (batch_size, *probe.shape)) # Broadcast a batch dimension, essentially using same probe for all samples
         return probes
     
     def get_propagators(self, indices):
