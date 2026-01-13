@@ -93,7 +93,8 @@ class PtychoAD(torch.nn.Module):
             self.obj_preblur_std        = model_params['obj_preblur_std']
             if init_variables.get('on_the_fly_meas_padded', None) is not None:
                 self.meas_padded        = torch.tensor(init_variables['on_the_fly_meas_padded'], dtype=torch.float32, device=device)
-                self.meas_padded_idx    = torch.tensor(init_variables['on_the_fly_meas_padded_idx'], dtype=torch.int32, device=device)
+                # Keep padding indices as Python ints so torch.compile doesn't have to reason about 0-d tensors in slicing.
+                self.meas_padded_idx    = tuple(int(v) for v in init_variables['on_the_fly_meas_padded_idx'])
             else:
                 self.meas_padded        = None
             self.meas_scale_factors     = init_variables.get('on_the_fly_meas_scale_factors', None)
@@ -277,8 +278,9 @@ class PtychoAD(torch.nn.Module):
         if self.shift_probes:
             probes = imshift_batch(probe, shifts = self.opt_probe_pos_shifts[indices], grid = self.shift_probes_grid)
         else:
-            batch_size = indices.shape[0]
-            probes = torch.broadcast_to(probe, (batch_size, *probe.shape)) # Broadcast a batch dimension, essentially using same probe for all samples
+            # Avoid torch.broadcast_to here: it may coerce symbolic sizes to Python ints under torch.compile,
+            # which forces the batch dimension to be specialized (e.g. to 32) and triggers recompiles/errors.
+            probes = probe.unsqueeze(0).expand(indices.size(0), -1, -1, -1)
         return probes
     
     def get_propagators(self, indices):
@@ -378,8 +380,7 @@ class PtychoAD(torch.nn.Module):
             measurements = self.measurements[indices]
             
             if self.meas_padded is not None:
-                canvas = torch.zeros((measurements.shape[0], *meas_padded.shape[-2:]), dtype=dtype, device=device)
-                canvas += meas_padded
+                canvas = meas_padded.expand(measurements.size(0), -1, -1).clone()
                 canvas[..., pad_h1:pad_h2, pad_w1:pad_w2] = measurements # Replace the center part with the original meas
                 measurements = canvas
             
