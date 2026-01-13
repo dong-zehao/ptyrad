@@ -609,6 +609,9 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     # torch.compile options
     vprint(f"### Setting PyTorch compiler with {compiler_configs} ###", verbose=verbose)
     vprint(" ", verbose=verbose)
+    # Cache numeric loss params (e.g., ln_order) as plain Python floats before tracing.
+    if hasattr(loss_fn, "refresh_cached_params"):
+        loss_fn.refresh_cached_params()
     model_instance = model.module if hasattr(model, "module") else model
     def compute_loss_batch(batch_tensor):
         return compute_loss(batch_tensor, model, model_instance, loss_fn, acc)
@@ -1070,6 +1073,9 @@ def optuna_objective(trial, params, init, loss_fn, constraint_fn, device='cuda',
     # torch.compile options
     vprint(f"### Setting PyTorch compiler with {compiler_configs} ###", verbose=verbose)
     vprint(" ", verbose=verbose)
+    # Cache numeric loss params (e.g., ln_order) as plain Python floats before tracing.
+    if hasattr(loss_fn, "refresh_cached_params"):
+        loss_fn.refresh_cached_params()
     model_instance = model.module if hasattr(model, "module") else model
     def compute_loss_batch(batch_tensor):
         return compute_loss(batch_tensor, model, model_instance, loss_fn)

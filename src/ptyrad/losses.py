@@ -47,6 +47,18 @@ class CombinedLoss(torch.nn.Module):
         self.device = device
         self.loss_params = loss_params
         self.mse = torch.nn.MSELoss(reduction='mean')
+        self._loss_sparse_enabled = False
+        self._loss_sparse_weight = 0.0
+        self._loss_sparse_ln_order = 1.0
+        self.refresh_cached_params()
+
+    def refresh_cached_params(self):
+        """Refresh cached numeric params from `self.loss_params` for torch.compile stability."""
+        loss_params = self.loss_params or {}
+        sparse_params = loss_params.get('loss_sparse', {}) or {}
+        self._loss_sparse_enabled = bool(sparse_params.get('state', False))
+        self._loss_sparse_weight = float(sparse_params.get('weight', 0.0))
+        self._loss_sparse_ln_order = float(sparse_params.get('ln_order', 1.0))
 
     def get_loss_single(self, model_DP, measured_DP):
         # Calculate loss_single
@@ -105,10 +117,19 @@ class CombinedLoss(torch.nn.Module):
         # Scaling the obj value by its omode_occu would make non-linear loss like l2 dependent on # of omode.
         # Therefore, the proper way is to get a loss tensor L(obj) shaped (N, omode, Nz, Ny, Nx) and then do the voxel-wise mean across (N,:,Nz,Ny,Nx)
         # and lastly we do the weighted sum with omode_occu so that the loss value is not batch, object size, or omode dependent.
-        sparse_params = self.loss_params['loss_sparse']
-        if sparse_params['state']:
-            ln_order = sparse_params['ln_order']
-            loss_sparse = sparse_params['weight'] * (torch.mean(objp_patches.abs().pow(ln_order), dim=(0,2,3,4)).pow(1/ln_order) * omode_occu).sum()
+        if self._loss_sparse_enabled:
+            # Keep `ln_order` as a Python float constant for torch.compile stability.
+            # In practice ln_order is almost always 1 (L1) or 2 (L2), so we avoid a generic `pow(x, ln_order)`
+            # which can trigger inductor symbolic scalar issues in backward on some setups.
+            ln_order = self._loss_sparse_ln_order
+            abs_patches = objp_patches.abs()
+            if ln_order == 1.0:
+                per_omode = torch.mean(abs_patches, dim=(0, 2, 3, 4))
+            elif ln_order == 2.0:
+                per_omode = torch.mean(abs_patches.square(), dim=(0, 2, 3, 4)).sqrt()
+            else:
+                per_omode = torch.mean(abs_patches.pow(ln_order), dim=(0, 2, 3, 4)).pow(1.0 / ln_order)
+            loss_sparse = self._loss_sparse_weight * (per_omode * omode_occu).sum()
         else:
             loss_sparse = torch.tensor(0, dtype=torch.float32, device=self.device)
         return loss_sparse
@@ -129,7 +150,8 @@ class CombinedLoss(torch.nn.Module):
             if obj_type in ['amplitude', 'both']:
                 if obj_blur_std is not None and obj_blur_std != 0:
                     obja_shape = obja_patches.shape
-                    obja = obja_patches.reshape(-1, obja_shape[-2], obja_shape[-1])
+                    Ny, Nx = obja_shape[-2], obja_shape[-1]
+                    obja = obja_patches.reshape(-1, 1, Ny, Nx)
                     obja_patches = gaussian_blur(obja, kernel_size=5, sigma=obj_blur_std).reshape(obja_shape)
                 if scale_factor is not None and any(scale != 1 for scale in scale_factor):
                     obja_patches = interpolate(obja_patches, scale_factor = scale_factor, mode = 'area')  
@@ -138,7 +160,8 @@ class CombinedLoss(torch.nn.Module):
             if obj_type in ['phase', 'both']:
                 if obj_blur_std is not None and obj_blur_std != 0:
                     objp_shape = objp_patches.shape
-                    objp = objp_patches.reshape(-1, objp_shape[-2], objp_shape[-1])
+                    Ny, Nx = objp_shape[-2], objp_shape[-1]
+                    objp = objp_patches.reshape(-1, 1, Ny, Nx)
                     objp_patches = gaussian_blur(objp, kernel_size=5, sigma=obj_blur_std).reshape(objp_shape)
                 if scale_factor is not None and any(scale != 1 for scale in scale_factor):
                     objp_patches = interpolate(objp_patches, scale_factor = scale_factor, mode = 'area')  

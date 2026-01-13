@@ -89,15 +89,30 @@ class PtychoAD(torch.nn.Module):
             # Setup model behaviors
             self.device                 = device
             self.verbose                = verbose
-            self.detector_blur_std      = model_params['detector_blur_std']
-            self.obj_preblur_std        = model_params['obj_preblur_std']
+            # Normalize scalar config values to plain Python types so torch.compile/inductor
+            # doesn't have to reason about symbolic scalar equality (e.g. "NYI SymFloat equality").
+            detector_blur_std = model_params.get('detector_blur_std', None)
+            self.detector_blur_std = None if detector_blur_std is None else float(detector_blur_std)
+            obj_preblur_std = model_params.get('obj_preblur_std', None)
+            self.obj_preblur_std = None if obj_preblur_std is None else float(obj_preblur_std)
+
             if init_variables.get('on_the_fly_meas_padded', None) is not None:
                 self.meas_padded        = torch.tensor(init_variables['on_the_fly_meas_padded'], dtype=torch.float32, device=device)
                 # Keep padding indices as Python ints so torch.compile doesn't have to reason about 0-d tensors in slicing.
                 self.meas_padded_idx    = tuple(int(v) for v in init_variables['on_the_fly_meas_padded_idx'])
             else:
                 self.meas_padded        = None
-            self.meas_scale_factors     = init_variables.get('on_the_fly_meas_scale_factors', None)
+            scale_factors = init_variables.get('on_the_fly_meas_scale_factors', None)
+            if scale_factors is None:
+                self.meas_scale_factors = None
+            else:
+                self.meas_scale_factors = (float(scale_factors[0]), float(scale_factors[1]))
+            self._meas_needs_resample = bool(
+                self.meas_scale_factors is not None
+                and (self.meas_scale_factors[0] != 1.0 or self.meas_scale_factors[1] != 1.0)
+            )
+            self._do_obj_preblur = bool(self.obj_preblur_std is not None and self.obj_preblur_std != 0.0)
+            self._do_detector_blur = bool(self.detector_blur_std is not None and self.detector_blur_std != 0.0)
 
             # Parse the learning rate, start iter and weight decay for optimizable tensors
             start_iter_dict = {}
@@ -374,8 +389,8 @@ class PtychoAD(torch.nn.Module):
             meas_padded  = self.meas_padded
             meas_padded_idx = self.meas_padded_idx
             pad_h1, pad_h2, pad_w1, pad_w2 = meas_padded_idx
-        scale_factor = tuple(self.meas_scale_factors) if self.meas_scale_factors is not None else None
-        
+        scale_factor = self.meas_scale_factors
+
         if indices is not None:
             measurements = self.measurements[indices]
             
@@ -384,8 +399,15 @@ class PtychoAD(torch.nn.Module):
                 canvas[..., pad_h1:pad_h2, pad_w1:pad_w2] = measurements # Replace the center part with the original meas
                 measurements = canvas
             
-            if self.meas_scale_factors is not None and any(factor != 1 for factor in scale_factor):
-                measurements = torch.nn.functional.interpolate(measurements[None,], scale_factor=scale_factor, mode='bilinear')[0] # 2D interpolate requires 4D input (N, C, H, W)
+            if self._meas_needs_resample:
+                # Use (N, C=1, H, W) layout so the dynamic dimension stays on the batch axis.
+                # Using (1, C=N, H, W) makes the dynamic batch dimension become "channels", which is harder for inductor.
+                measurements = torch.nn.functional.interpolate(
+                    measurements.unsqueeze(1),
+                    scale_factor=scale_factor,
+                    mode='bilinear',
+                    align_corners=False,
+                ).squeeze(1)
                 measurements = measurements / prod(scale_factor) # This ensures the intensity scale and the integrated intensity are unchanged
             
         else: # Skip the "on-the-fly" operations so it won't throw any CUDA out-of-memory error. All typical PtyRAD usuage would pass get_measurements(batch) so this should be ok.
@@ -403,17 +425,23 @@ class PtychoAD(torch.nn.Module):
         
         object_patches = self.get_obj_ROI(indices)
         
-        if self.obj_preblur_std is not None and self.obj_preblur_std != 0:
-            # Permute and reshape approach, this is much faster than the stack/list comprehension version
-            obj = object_patches.permute(5,0,1,2,3,4) # Move the r/i to the front
+        if self._do_obj_preblur:
+            # Use NCHW with a static channel dimension to keep inductor happy under dynamic batch sizes.
+            # (Passing a 3D tensor makes torchvision treat the leading dim as channels and sets groups=channels,
+            # which becomes dynamic and can trigger "NYI SymFloat equality".)
+            obj = object_patches.permute(5, 0, 1, 2, 3, 4)  # (2, N, omode, Nz, Ny, Nx)
             obj_shape = obj.shape
-            obj = obj.reshape(-1, obj_shape[-2], obj_shape[-1])
-            object_patches = gaussian_blur(obj, kernel_size=5, sigma=self.obj_preblur_std).reshape(obj_shape).permute(1,2,3,4,5,0)
+            Ny, Nx = obj_shape[-2], obj_shape[-1]
+            obj = obj.reshape(-1, 1, Ny, Nx)
+            obj = gaussian_blur(obj, kernel_size=5, sigma=self.obj_preblur_std)
+            obj = obj.reshape(obj_shape)
+            object_patches = obj.permute(1, 2, 3, 4, 5, 0)
         
         probes         = self.get_probes(indices)
         propagators    = self.get_propagators(indices)
         dp_fwd         = multislice_forward_model_vec_all(object_patches, self.omode_occu, probes, propagators)
         
-        if self.detector_blur_std is not None and self.detector_blur_std != 0:
-            dp_fwd = gaussian_blur(dp_fwd, kernel_size=5, sigma=self.detector_blur_std)
+        if self._do_detector_blur:
+            # Keep channels static (=1) so torchvision gaussian_blur doesn't set groups to a dynamic value.
+            dp_fwd = gaussian_blur(dp_fwd.unsqueeze(1), kernel_size=5, sigma=self.detector_blur_std).squeeze(1)
         return dp_fwd, object_patches
