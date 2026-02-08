@@ -384,7 +384,7 @@ def orthogonalize_modes_vec(modes, sort = False):
         _, evecs = torch.linalg.eig(A.to('cpu'))
         evecs = evecs.to('mps')
     else:
-        _, evecs = torch.linalg.eig(A)
+        _, evecs = torch.linalg.eigh(A)
    
     # Matrix-multiplication version (N,N) @ (N,YX) = (N,YX)
     ortho_modes = torch.matmul(evecs.H, modes_reshaped).reshape(input_shape)
