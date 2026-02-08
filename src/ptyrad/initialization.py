@@ -1117,11 +1117,12 @@ class Initializer:
 
     def _process_probe(self, probe):
         """
-        Process the loaded probe, including permutation, normalization
+        Process the loaded probe, including permutation, interpolation, and normalization.
         """
         # If the processing config is None, the methods will skip it internally
         
         probe = self._probe_permute(probe, self.init_params.get('probe_permute'))
+        probe = self._probe_interpolate(probe, self.init_params.get('probe_interpolate'))
         probe = self._probe_normalize(probe, self.init_params.get('probe_normalize'))
         return probe
 
@@ -1132,6 +1133,54 @@ class Initializer:
         if order is not None:
             vprint(f"Permuting probe with order = {order}", verbose=self.verbose)
             probe = probe.transpose(order)
+        return probe
+
+    def _probe_interpolate(self, probe, interp_cfg):
+        """
+        Interpolate the probe to a target size if specified in the parameters.
+
+        Parameters
+        ----------
+        probe : np.ndarray
+            Probe array with shape (pmode, Ny, Nx).
+        interp_cfg : dict or None
+            Interpolation config dictionary. Supported keys:
+            - ``target_shape`` (list[int]): target ``[Ny, Nx]``
+            - ``order`` (int): interpolation order for ``scipy.ndimage.zoom``
+              (0=nearest, 1=linear, 3=cubic, etc.).
+        """
+        if interp_cfg is None:
+            return probe
+
+        try:
+            target_shape = interp_cfg.get('target_shape')
+            order = interp_cfg.get('order', 1)
+        except AttributeError:
+            raise ValueError("'probe_interpolate' must be a dict or null.")
+
+        if target_shape is None:
+            return probe
+
+        if len(target_shape) != 2:
+            raise ValueError("'probe_interpolate.target_shape' must be a list or tuple of two integers [Ny, Nx].")
+
+        target_shape = [int(target_shape[0]), int(target_shape[1])]
+        source_shape = probe.shape[-2:]
+        if tuple(target_shape) == tuple(source_shape):
+            vprint(f"Skipping probe interpolation because probe shape already matches target_shape = {target_shape}", verbose=self.verbose)
+            return probe
+
+        zoom_factors = np.array([1.0, target_shape[0] / source_shape[0], target_shape[1] / source_shape[1]])
+        vprint(
+            f"Interpolating probe from (pmode, Ny, Nx) = {probe.shape} to (pmode, Ny, Nx) = ({probe.shape[0]}, {target_shape[0]}, {target_shape[1]}) with order = {order}",
+            verbose=self.verbose,
+        )
+
+        if np.iscomplexobj(probe):
+            probe = zoom(probe.real, zoom_factors, order=order) + 1j * zoom(probe.imag, zoom_factors, order=order)
+        else:
+            probe = zoom(probe, zoom_factors, order=order)
+
         return probe
     
     def _probe_normalize(self, probe, norm_cfg):
