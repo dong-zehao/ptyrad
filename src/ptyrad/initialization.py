@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import numpy as np
 from scipy.io.matlab import matfile_version as get_matfile_version
-from scipy.ndimage import gaussian_filter, zoom
+from scipy.ndimage import center_of_mass, gaussian_filter, shift, zoom
 
 from ptyrad.load import load_fields_from_mat, load_hdf5, load_npy, load_pt, load_raw, load_tif
 from ptyrad.utils import (
@@ -1123,6 +1123,7 @@ class Initializer:
         
         probe = self._probe_permute(probe, self.init_params.get('probe_permute'))
         probe = self._probe_interpolate(probe, self.init_params.get('probe_interpolate'))
+        probe = self._probe_recenter(probe, self.init_params.get('probe_recenter'))
         probe = self._probe_normalize(probe, self.init_params.get('probe_normalize'))
         return probe
 
@@ -1183,6 +1184,37 @@ class Initializer:
 
         return probe
     
+    def _probe_recenter(self, probe, recenter_cfg):
+        """
+        Recenter each probe mode so that its intensity centroid is at the center of the array.
+
+        Parameters
+        ----------
+        probe : np.ndarray
+            Probe array with shape (pmode, Ny, Nx).
+        recenter_cfg : bool or None
+            If True, recenter the probe modes. If None or False, skip.
+        """
+        if not recenter_cfg:
+            return probe
+
+        vprint("Recentering probe modes by intensity centroid", verbose=self.verbose)
+        Ny, Nx = probe.shape[-2:]
+        center = np.array([Ny / 2.0, Nx / 2.0])
+
+        for i in range(probe.shape[0]):
+            intensity = np.abs(probe[i]) ** 2
+            com = np.array(center_of_mass(intensity))
+            displacement = center - com
+            if np.iscomplexobj(probe):
+                probe[i] = (shift(probe[i].real, displacement, order=3)
+                            + 1j * shift(probe[i].imag, displacement, order=3))
+            else:
+                probe[i] = shift(probe[i], displacement, order=3)
+            vprint(f"  Mode {i}: centroid shift = ({displacement[0]:+.2f}, {displacement[1]:+.2f}) px", verbose=self.verbose)
+
+        return probe
+
     def _probe_normalize(self, probe, norm_cfg):
         """
         Normalize the probe intensity based on the measurements.
