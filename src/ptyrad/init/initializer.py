@@ -15,7 +15,7 @@ from typing import Optional
 
 import numpy as np
 from scipy.io.matlab import matfile_version as get_matfile_version
-from scipy.ndimage import gaussian_filter, zoom
+from scipy.ndimage import center_of_mass, gaussian_filter, shift, zoom
 
 from ptyrad.core.functional import complex_object_z_resample_torch
 from ptyrad.io.handlers import load_array_from_file, save_array
@@ -1483,6 +1483,7 @@ class Initializer:
         probe = self._probe_set_pmode_max(probe, pmode_max, pmode_init_pows, orthogonalize=True, sort=True)
         probe = self._probe_z_shift(probe, self.init_params.get('probe_z_shift'))
         probe = self._probe_interpolate(probe, self.init_params.get('probe_interpolate'))
+        probe = self._probe_recenter(probe, self.init_params.get('probe_recenter'))
         probe = self._probe_normalization(probe, self.init_params.get('probe_normalization'))
         return probe
 
@@ -1540,6 +1541,37 @@ class Initializer:
             probe = zoom(probe.real, zoom_factors, order=order) + 1j * zoom(probe.imag, zoom_factors, order=order)
         else:
             probe = zoom(probe, zoom_factors, order=order)
+
+        return probe
+    
+    def _probe_recenter(self, probe, recenter_cfg):
+        """
+        Recenter each probe mode so that its intensity centroid is at the center of the array.
+
+        Parameters
+        ----------
+        probe : np.ndarray
+            Probe array with shape (pmode, Ny, Nx).
+        recenter_cfg : bool or None
+            If True, recenter the probe modes. If None or False, skip.
+        """
+        if not recenter_cfg:
+            return probe
+
+        vprint("Recentering probe modes by intensity centroid", verbose=self.verbose)
+        Ny, Nx = probe.shape[-2:]
+        center = np.array([Ny / 2.0, Nx / 2.0])
+
+        for i in range(probe.shape[0]):
+            intensity = np.abs(probe[i]) ** 2
+            com = np.array(center_of_mass(intensity))
+            displacement = center - com
+            if np.iscomplexobj(probe):
+                probe[i] = (shift(probe[i].real, displacement, order=3)
+                            + 1j * shift(probe[i].imag, displacement, order=3))
+            else:
+                probe[i] = shift(probe[i], displacement, order=3)
+            vprint(f"  Mode {i}: centroid shift = ({displacement[0]:+.2f}, {displacement[1]:+.2f}) px", verbose=self.verbose)
 
         return probe
     
