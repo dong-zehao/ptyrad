@@ -1527,6 +1527,8 @@ class Initializer:
 
         target_shape = [int(target_shape[0]), int(target_shape[1])]
         source_shape = probe.shape[-2:]
+        # Record the source shape before interpolation so that pos can be rescaled accordingly
+        self.init_variables['probe_shape_before_interpolate'] = list(source_shape)
         if tuple(target_shape) == tuple(source_shape):
             vprint(f"Skipping probe interpolation because probe shape already matches target_shape = {target_shape}", verbose=self.verbose)
             return probe
@@ -1785,10 +1787,65 @@ class Initializer:
         Process the loaded probe positions, including flipping, affine transformations, and random displacements.
         """
         # If the processing config is None, the methods will skip it internally
-        
+        pos = self._pos_rescale_for_probe_interpolate(pos, self.init_params.get('pos_source'))
         pos = self._pos_scan_flipT(pos, self.init_params.get('pos_scan_flipT'))
         pos = self._pos_scan_affine_transform(pos, self.init_params.get('pos_scan_affine'))
         pos = self._pos_scan_add_random_displacement(pos, self.init_params.get('pos_scan_rand_std'))
+        return pos
+    
+    def _pos_rescale_for_probe_interpolate(self, pos, pos_source):
+        """
+        Rescale imported probe positions proportionally when probe interpolation is active.
+
+        When a probe loaded from a file is spatially interpolated (e.g. from 128 px to 256 px),
+        the positions that were computed in the *original* pixel coordinate system must be
+        scaled by the same factor so that they remain consistent with the new probe / object
+        pixel size.  This rescaling is only meaningful for *imported* positions (i.e. any
+        ``pos_source`` other than ``'simu'``), because simulated positions are already generated
+        in the correct pixel coordinate frame.
+
+        Parameters
+        ----------
+        pos : np.ndarray
+            Probe positions array with shape (N, 2) in (y, x) pixel coordinates.
+        pos_source : str or None
+            Value of ``init_params['pos_source']``.  Rescaling is skipped when this equals
+            ``'simu'`` or when no probe interpolation was performed.
+
+        Returns
+        -------
+        pos : np.ndarray
+            Rescaled (or unchanged) positions array.
+        """
+        # Only rescale imported positions — simulated positions are already in the correct frame
+        if pos_source == 'simu':
+            return pos
+
+        probe_shape_before = self.init_variables.get('probe_shape_before_interpolate')
+
+        if probe_shape_before is None:
+            return pos
+
+        # Use the actual probe array shape (after interpolation) rather than the initial
+        # probe_shape entry in init_variables (which reflects meas_Npix and is not updated
+        # after interpolation).
+        probe = self.init_variables.get('probe')
+        if probe is None:
+            return pos
+        probe_shape_after = probe.shape[-2:]
+
+        scale_y = probe_shape_after[0] / probe_shape_before[0]
+        scale_x = probe_shape_after[1] / probe_shape_before[1]
+
+        if scale_y == 1.0 and scale_x == 1.0:
+            return pos
+
+        vprint(
+            f"Rescaling imported probe positions by (scale_y, scale_x) = ({scale_y:.4f}, {scale_x:.4f}) "
+            f"to match probe interpolation from {probe_shape_before} to {list(probe_shape_after)}",
+            verbose=self.verbose,
+        )
+        pos = pos * np.array([scale_y, scale_x])
         return pos
     
     def _pos_scan_flipT(self, pos, flipT_axes):
