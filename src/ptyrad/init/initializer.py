@@ -1530,14 +1530,11 @@ class Initializer:
         # Record the source shape before interpolation so that pos can be rescaled accordingly
         self.init_variables['probe_shape_before_interpolate'] = list(source_shape)
         if tuple(target_shape) == tuple(source_shape):
-            vprint(f"Skipping probe interpolation because probe shape already matches target_shape = {target_shape}", verbose=self.verbose)
+            logger.info(f"Skipping probe interpolation because probe shape already matches target_shape = {target_shape}", verbose=self.verbose)
             return probe
 
         zoom_factors = np.array([1.0, target_shape[0] / source_shape[0], target_shape[1] / source_shape[1]])
-        vprint(
-            f"Interpolating probe from (pmode, Ny, Nx) = {probe.shape} to (pmode, Ny, Nx) = ({probe.shape[0]}, {target_shape[0]}, {target_shape[1]}) with order = {order}",
-            verbose=self.verbose,
-        )
+        logger.info(f"Interpolating probe from (pmode, Ny, Nx) = {probe.shape} to (pmode, Ny, Nx) = ({probe.shape[0]}, {target_shape[0]}, {target_shape[1]}) with order = {order}")
 
         if np.iscomplexobj(probe):
             probe = zoom(probe.real, zoom_factors, order=order) + 1j * zoom(probe.imag, zoom_factors, order=order)
@@ -1560,7 +1557,7 @@ class Initializer:
         if not recenter_cfg:
             return probe
 
-        vprint("Recentering probe modes by intensity centroid", verbose=self.verbose)
+        logger.info("Recentering probe modes by intensity centroid", verbose=self.verbose)
         Ny, Nx = probe.shape[-2:]
         center = np.array([Ny / 2.0, Nx / 2.0])
 
@@ -1573,7 +1570,7 @@ class Initializer:
                             + 1j * shift(probe[i].imag, displacement, order=3))
             else:
                 probe[i] = shift(probe[i], displacement, order=3)
-            vprint(f"  Mode {i}: centroid shift = ({displacement[0]:+.2f}, {displacement[1]:+.2f}) px", verbose=self.verbose)
+            logger.info(f"  Mode {i}: centroid shift = ({displacement[0]:+.2f}, {displacement[1]:+.2f}) px", verbose=self.verbose)
 
         return probe
     
@@ -1840,10 +1837,9 @@ class Initializer:
         if scale_y == 1.0 and scale_x == 1.0:
             return pos
 
-        vprint(
+        logger.info(
             f"Rescaling imported probe positions by (scale_y, scale_x) = ({scale_y:.4f}, {scale_x:.4f}) "
-            f"to match probe interpolation from {probe_shape_before} to {list(probe_shape_after)}",
-            verbose=self.verbose,
+            f"to match probe interpolation from {probe_shape_before} to {list(probe_shape_after)}"
         )
         pos = pos * np.array([scale_y, scale_x])
         return pos
