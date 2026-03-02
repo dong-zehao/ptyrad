@@ -397,7 +397,7 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
             if not isinstance(optimizer, torch.optim.LBFGS): # Only compile first-order optimizers (like Adam), L-BFGS relies on dynamic closures that cannot be safely traced.
                 optimizer.step = torch.compile(optimizer.step, **compiler_configs)
         
-        batch_losses = recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, acc=acc, compute_loss_fn=compute_loss_fn)
+        batch_losses = recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, NITER, acc=acc, compute_loss_fn=compute_loss_fn)
         
         # Only log the main process
         if acc is None or acc.is_main_process:
@@ -415,7 +415,7 @@ def recon_loop(model, init, params, optimizer, loss_fn, constraint_fn, indices, 
     logger.info(f"### Finished {NITER} iterations, averaged iter_t = {np.mean(model_instance.iter_times):.5g} with std = {np.std(model_instance.iter_times):.3f} ###")
     logger.info(" ")
 
-def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, acc=None, compute_loss_fn=None):
+def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint_fn, niter, NITER, acc=None, compute_loss_fn=None):
     """
     Performs one iteration (or step) of the ptychographic reconstruction in the optimization loop.
 
@@ -556,6 +556,7 @@ def recon_step(batches, grad_accumulation, model, optimizer, loss_fn, constraint
     model_instance.iter_times.append(iter_t)
     model_instance.dz_iters.append((niter, model_instance.opt_slice_thickness.detach().cpu().numpy()))
     model_instance.avg_tilt_iters.append((niter, model_instance.opt_obj_tilts.detach().mean(0).cpu().numpy()))
+    logger.info(f" Estimated remaining time: {parse_sec_to_time_str(iter_t * (NITER - niter))}")
     return batch_losses
 
 # ==============================================================================
