@@ -20,6 +20,8 @@ from .basic import (
     plot_slice_thickness,
 )
 
+from ptyrad.utils.affine import fit_scan_affine
+
 logger = logging.getLogger(__name__)
 
 def plot_summary(output_path, model, niter, indices, init_variables, selected_figs=['loss', 'forward', 'probe_r_amp', 'probe_k_amp', 'probe_k_phase', 'pos'], collate_str='', show_fig=True, save_fig=False):
@@ -88,6 +90,7 @@ def plot_summary(output_path, model, niter, indices, init_variables, selected_fi
             
             
     # Scan positions and tilts
+    init_pos_pre_affine = init_variables['pos_pre_affine']
     init_pos = init_variables['crop_pos'] + init_variables['probe_pos_shifts']
     pos = (model.crop_pos + model.opt_probe_pos_shifts).detach().cpu().numpy()
     tilts = model.opt_obj_tilts.detach().cpu().numpy()
@@ -95,7 +98,8 @@ def plot_summary(output_path, model, niter, indices, init_variables, selected_fi
     
     if 'pos' in selected_figs or 'all' in selected_figs:
         fig_scan_pos, ax = plot_scan_positions(pos=pos[indices], init_pos=init_pos[indices], dot_scale=1, show_fig=False, pass_fig=True)
-        ax.set_title(f"Scan positions at iter {niter}", fontsize=16)
+        scale, asymmetry, rotation, shear = fit_scan_affine(init_pos_pre_affine, pos)
+        ax.set_title(f"Scan positions at iter {niter}: (scale, asymmetry, rotation, shear) = ({scale:.3g}, {asymmetry:.3g}, {rotation:.3g}, {shear:.3g})", fontsize=16)
         if show_fig:
             fig_scan_pos.show()
         if save_fig:
