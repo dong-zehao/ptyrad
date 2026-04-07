@@ -1532,7 +1532,7 @@ class Initializer:
         target_shape = [int(target_shape[0]), int(target_shape[1])]
         source_shape = probe.shape[-2:]
         if tuple(target_shape) == tuple(source_shape):
-            logger.info(f"Skipping probe interpolation because probe shape already matches target_shape = {target_shape}", verbose=self.verbose)
+            logger.info(f"Skipping probe interpolation because probe shape already matches target_shape = {target_shape}")
             return probe
 
         zoom_factors = np.array([1.0, target_shape[0] / source_shape[0], target_shape[1] / source_shape[1]])
@@ -1559,7 +1559,7 @@ class Initializer:
         if not recenter_cfg:
             return probe
 
-        logger.info("Recentering probe modes by intensity centroid", verbose=self.verbose)
+        logger.info("Recentering probe modes by intensity centroid")
         Ny, Nx = probe.shape[-2:]
         center = np.array([Ny / 2.0, Nx / 2.0])
 
@@ -1572,7 +1572,7 @@ class Initializer:
                             + 1j * shift(probe[i].imag, displacement, order=3))
             else:
                 probe[i] = shift(probe[i], displacement, order=3)
-            logger.info(f"  Mode {i}: centroid shift = ({displacement[0]:+.2f}, {displacement[1]:+.2f}) px", verbose=self.verbose)
+            logger.info(f"  Mode {i}: centroid shift = ({displacement[0]:+.2f}, {displacement[1]:+.2f}) px")
 
         return probe
     
