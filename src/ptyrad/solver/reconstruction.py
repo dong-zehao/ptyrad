@@ -526,7 +526,7 @@ def recon_loop(model, init, params, optimizer, scheduler, loss_fn, constraint_fn
             if not isinstance(optimizer, torch.optim.LBFGS): # Only compile first-order optimizers (like Adam), L-BFGS relies on dynamic closures that cannot be safely traced.
                 optimizer.step = torch.compile(optim_step_fn, **optim_compiler_configs)
         
-        batch_losses = recon_step(batches, grad_accumulation, model, optimizer, scheduler, loss_fn, constraint_fn, niter, acc=acc, compute_loss_fn=compute_loss_fn, scheduler_step_unit=scheduler_step_unit)
+        batch_losses = recon_step(batches, grad_accumulation, model, optimizer, scheduler, loss_fn, constraint_fn, niter, NITER, acc=acc, compute_loss_fn=compute_loss_fn, scheduler_step_unit=scheduler_step_unit)
 
         # Only log the main process
         if acc is None or acc.is_main_process:
@@ -549,7 +549,7 @@ def recon_loop(model, init, params, optimizer, scheduler, loss_fn, constraint_fn
     logger.info(f"### Finished {NITER} iterations, averaged iter_t = {np.mean(model_instance.iter_times):.5g} with std = {np.std(model_instance.iter_times):.3f} ###")
     logger.info(" ")
 
-def recon_step(batches, grad_accumulation, model, optimizer, scheduler, loss_fn, constraint_fn, niter, acc=None, compute_loss_fn=None, scheduler_step_unit: str = "iter"):
+def recon_step(batches, grad_accumulation, model, optimizer, scheduler, loss_fn, constraint_fn, niter, NITER, acc=None, compute_loss_fn=None, scheduler_step_unit: str = "iter"):
     """
     Performs one iteration (or step) of the ptychographic reconstruction in the optimization loop.
 
@@ -738,6 +738,7 @@ def recon_step(batches, grad_accumulation, model, optimizer, scheduler, loss_fn,
     model_instance.avg_tilt_iters['niter'].append(niter)
     model_instance.avg_tilt_iters['tilt_y'].append(float(avg_tilts[0]))
     model_instance.avg_tilt_iters['tilt_x'].append(float(avg_tilts[1]))
+    logger.info(f" Estimated remaining time: {parse_sec_to_time_str(iter_t * (NITER - niter))}")
     return batch_losses
 
 # ==============================================================================

@@ -15,7 +15,7 @@ from typing import Optional
 
 import numpy as np
 from scipy.io.matlab import matfile_version as get_matfile_version
-from scipy.ndimage import gaussian_filter, zoom
+from scipy.ndimage import center_of_mass, gaussian_filter, shift, zoom
 
 from ptyrad.core.functional import complex_object_z_resample_torch
 from ptyrad.io.handlers import load_array_from_file, save_array
@@ -402,6 +402,10 @@ class Initializer:
         logger.info("### Initializing probe positions ###")
     
         pos = self._load_pos()
+        
+        # Save the initial position before applying affine matrix
+        self.init_variables['pos_pre_affine'] = pos
+        
         pos = self._process_pos(pos)
 
         probe_shape = self.init_variables['probe_shape']
@@ -1490,7 +1494,7 @@ class Initializer:
 
     def _process_probe(self, probe):
         """
-        Process the loaded probe, including permutation, setting pmode, and normalization
+        Process the loaded probe, including permutation, interpolation, setting pmode, and normalization.
         """
         # If the processing config is None, the methods will skip it internally
         
@@ -1500,6 +1504,8 @@ class Initializer:
         probe = self._probe_permute(probe, self.init_params.get('probe_permute'))
         probe = self._probe_set_pmode_max(probe, pmode_max, pmode_init_pows, orthogonalize=True, sort=True)
         probe = self._probe_z_shift(probe, self.init_params.get('probe_z_shift'))
+        probe = self._probe_interpolate(probe, self.init_params.get('probe_interpolate'))
+        probe = self._probe_recenter(probe, self.init_params.get('probe_recenter'))
         probe = self._probe_normalization(probe, self.init_params.get('probe_normalization'))
         return probe
 
@@ -1510,6 +1516,84 @@ class Initializer:
         if order is not None:
             logger.info(f"Permuting probe with order = {order}")
             probe = probe.transpose(order)
+        return probe
+
+    def _probe_interpolate(self, probe, interp_cfg):
+        """
+        Interpolate the probe to a target size if specified in the parameters.
+
+        Parameters
+        ----------
+        probe : np.ndarray
+            Probe array with shape (pmode, Ny, Nx).
+        interp_cfg : dict or None
+            Interpolation config dictionary. Supported keys:
+            - ``target_shape`` (list[int]): target ``[Ny, Nx]``
+            - ``order`` (int): interpolation order for ``scipy.ndimage.zoom``
+              (0=nearest, 1=linear, 3=cubic, etc.).
+        """
+        if interp_cfg is None:
+            return probe
+
+        try:
+            target_shape = interp_cfg.get('target_shape')
+            order = interp_cfg.get('order', 1)
+        except AttributeError:
+            raise ValueError("'probe_interpolate' must be a dict or null.")
+
+        if target_shape is None:
+            return probe
+
+        if len(target_shape) != 2:
+            raise ValueError("'probe_interpolate.target_shape' must be a list or tuple of two integers [Ny, Nx].")
+
+        target_shape = [int(target_shape[0]), int(target_shape[1])]
+        source_shape = probe.shape[-2:]
+        # Record the source shape before interpolation so that pos can be rescaled accordingly
+        self.init_variables['probe_shape_before_interpolate'] = list(source_shape)
+        if tuple(target_shape) == tuple(source_shape):
+            logger.info(f"Skipping probe interpolation because probe shape already matches target_shape = {target_shape}")
+            return probe
+
+        zoom_factors = np.array([1.0, target_shape[0] / source_shape[0], target_shape[1] / source_shape[1]])
+        logger.info(f"Interpolating probe from (pmode, Ny, Nx) = {probe.shape} to (pmode, Ny, Nx) = ({probe.shape[0]}, {target_shape[0]}, {target_shape[1]}) with order = {order}")
+
+        if np.iscomplexobj(probe):
+            probe = zoom(probe.real, zoom_factors, order=order) + 1j * zoom(probe.imag, zoom_factors, order=order)
+        else:
+            probe = zoom(probe, zoom_factors, order=order)
+
+        return probe
+    
+    def _probe_recenter(self, probe, recenter_cfg):
+        """
+        Recenter each probe mode so that its intensity centroid is at the center of the array.
+
+        Parameters
+        ----------
+        probe : np.ndarray
+            Probe array with shape (pmode, Ny, Nx).
+        recenter_cfg : bool or None
+            If True, recenter the probe modes. If None or False, skip.
+        """
+        if not recenter_cfg:
+            return probe
+
+        logger.info("Recentering probe modes by intensity centroid")
+        Ny, Nx = probe.shape[-2:]
+        center = np.array([Ny / 2.0, Nx / 2.0])
+
+        for i in range(probe.shape[0]):
+            intensity = np.abs(probe[i]) ** 2
+            com = np.array(center_of_mass(intensity))
+            displacement = center - com
+            if np.iscomplexobj(probe):
+                probe[i] = (shift(probe[i].real, displacement, order=3)
+                            + 1j * shift(probe[i].imag, displacement, order=3))
+            else:
+                probe[i] = shift(probe[i], displacement, order=3)
+            logger.info(f"  Mode {i}: centroid shift = ({displacement[0]:+.2f}, {displacement[1]:+.2f}) px")
+
         return probe
     
     def _probe_set_pmode_max(self, probe, pmode_max, pmode_init_pows, orthogonalize=True, sort=True):
@@ -1740,10 +1824,61 @@ class Initializer:
         Process the loaded probe positions, including flipping, affine transformations, and random displacements.
         """
         # If the processing config is None, the methods will skip it internally
-        
+        pos = self._pos_rescale_for_probe_interpolate(pos, self.init_params.get('pos_source'))
         pos = self._pos_scan_flipT(pos, self.init_params.get('pos_scan_flipT'))
         pos = self._pos_scan_affine_transform(pos, self.init_params.get('pos_scan_affine'))
         pos = self._pos_scan_add_random_displacement(pos, self.init_params.get('pos_scan_rand_std'))
+        return pos
+    
+    def _pos_rescale_for_probe_interpolate(self, pos, pos_source):
+        """
+        Rescale imported probe positions proportionally when probe interpolation is active.
+
+        When a probe loaded from a file is spatially interpolated (e.g. from 128 px to 256 px),
+        the positions that were computed in the *original* pixel coordinate system must be
+        scaled by the same factor so that they remain consistent with the new probe / object
+        pixel size.  This rescaling is only meaningful for *imported* positions (i.e. any
+        ``pos_source`` other than ``'simu'``), because simulated positions are already generated
+        in the correct pixel coordinate frame.
+
+        Parameters
+        ----------
+        pos : np.ndarray
+            Probe positions array with shape (N, 2) in (y, x) pixel coordinates.
+        pos_source : str or None
+            Value of ``init_params['pos_source']``.  Rescaling is skipped when this equals
+            ``'simu'`` or when no probe interpolation was performed.
+
+        Returns
+        -------
+        pos : np.ndarray
+            Rescaled (or unchanged) positions array.
+        """
+        # Only rescale imported positions — simulated positions are already in the correct frame
+        if pos_source == 'simu':
+            return pos
+
+        probe_shape_before = self.init_variables.get('probe_shape_before_interpolate')
+
+        if probe_shape_before is None:
+            return pos
+
+        # Use the actual probe array shape (after interpolation) rather than the initial
+        # probe_shape entry in init_variables (which reflects meas_Npix and is not updated
+        # after interpolation).
+        probe = self.init_variables.get('probe')
+        if probe is None:
+            return pos
+        probe_shape_after = probe.shape[-2:]
+
+        scale_y = probe_shape_after[0] / probe_shape_before[0]
+        scale_x = probe_shape_after[1] / probe_shape_before[1]
+
+        if scale_y == 1.0 and scale_x == 1.0:
+            return pos
+
+        logger.info(f"Rescaling imported probe positions by (scale_y, scale_x) = ({scale_y:.4f}, {scale_x:.4f}) to match probe interpolation from {probe_shape_before} to {list(probe_shape_after)}")
+        pos = pos * np.array([scale_y, scale_x])
         return pos
     
     def _pos_scan_flipT(self, pos, flipT_axes):

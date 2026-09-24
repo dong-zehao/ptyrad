@@ -77,13 +77,13 @@ def run(args):
     # Set up accelerator for multiGPU/mixed-precision setting, 
     # note that these we need to call the command as:
     # `accelerate launch --num_processes=2 --mixed_precision='no' -m ptyrad run <PTYRAD_ARGUMENTS> --gpuid 'acc'`
-    accelerator = set_accelerator() 
+    #accelerator = set_accelerator() 
 
     print_system_info()
     params = load_params(params_path, validate=not args.skip_validate)
     device = set_gpu_device(args.gpuid)
-    seed = resolve_seed_priority(args_seed=args.seed, params_seed=get_nested(params, "init_params.random_seed", safe=True), acc=accelerator)
-    ptycho_solver = PtyRADSolver(params, device=device, seed=seed, acc=accelerator)
+    seed = resolve_seed_priority(args_seed=args.seed, params_seed=get_nested(params, "init_params.random_seed", safe=True), acc=None)
+    ptycho_solver = PtyRADSolver(params, device=device, seed=seed, acc=None)
     ptycho_solver.run()
 
 def check_gpu(args):

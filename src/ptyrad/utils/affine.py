@@ -35,6 +35,15 @@ def decompose_affine_matrix(input_affine_mat):
 
     return scale, asymmetry, rotation, shear
 
+def fit_scan_affine(init_pos, final_pos):
+    # This function fits the best affine matrix that transforms init_pos to final_pos, 
+    # and also decomposes the affine matrix into scale, asymmetry, rotation, and shear parameters.
+    init_centered = init_pos - init_pos.mean(0)
+    final_centered = final_pos - final_pos.mean(0)
+    affine_mat, _, _, _ = np.linalg.lstsq(init_centered, final_centered, rcond=None)
+    scale, asymmetry, rotation, shear = decompose_affine_matrix(affine_mat)
+    return (scale, asymmetry, rotation, shear)
+
 def get_decomposed_affine_matrix_from_bases(input, output):
     """ Fit the affine matrix components from input and output matrices A and B """
     # This util function is used to quickly estimate the needed affine transformation for scan positions
