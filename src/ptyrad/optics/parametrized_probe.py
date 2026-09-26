@@ -14,6 +14,17 @@ def default_coefficients():
             for suffix in (("",) if m == 0 else ("a", "b"))]
 
 
+def phase_normalized_lr_scale(name, conv_angle):
+    """Match a coefficient's aperture-edge phase change to that of C10.
+
+    The largest phase basis value at semi-angle alpha is proportional to
+    alpha ** (n + 1) / (n + 1), independent of the angular component.
+    """
+    n, _, _ = coefficient_order(name)
+    alpha = conv_angle / 1000  # mrad -> rad
+    return (n + 1) / 2 * alpha ** (1 - n)
+
+
 class ParametrizedProbe(nn.Module):
     def __init__(self, *, size, dx, wavelength, conv_angle, intensity,
                  aberrations=None, extra_names=(), z_shift=0.0,

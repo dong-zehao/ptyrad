@@ -365,6 +365,8 @@ class ReconParams(BaseModel):
     - 'probe_r_amp': Probe modes amplitude in real space.
     - 'probe_k_amp': Probe modes amplitude in Fourier space.
     - 'probe_k_phase': Probe modes phase in Fourier space.
+      Selecting any probe figure also saves one per-order coefficient history
+      figure when the probe is parametrized.
     - 'pos': Scan positions overlay (init vs optimized).
     - 'tilt': Object tilt quiver plot (snapshot).
     - 'all': All of the above.

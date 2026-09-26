@@ -7,7 +7,9 @@ import torch
 
 from ptyrad.core.models.ptycho import PtychoModel
 from ptyrad.io.load import load_ptyrad
-from ptyrad.optics.parametrized_probe import ParametrizedProbe, default_coefficients
+from ptyrad.optics.parametrized_probe import (
+    ParametrizedProbe, default_coefficients, phase_normalized_lr_scale,
+)
 from ptyrad.params.probe_params import ProbeParams
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,12 @@ class ParametrizedPtychoModel(PtychoModel):
         self.probe_generator = ParametrizedProbe(**geometry, aberrations=aberrations,
                                                  extra_names=overrides, device=device)
         self.probe_config = config
+        initial_coefficients = self.probe_generator.current_coefficients().detach().cpu().tolist()
+        self.probe_coefficient_iters = {
+            'niter': [0],
+            'coefficients': {name: [value] for name, value in
+                             zip(self.probe_generator.names, initial_coefficients)},
+        }
         self.probe_update = dict(model_params['update_params']['probe'])
         # Keep the historical probe dictionary entry as an inert buffer for exporters.
         # All consumers get the current complex probe through get_complex_probe_view().
@@ -89,18 +97,24 @@ class ParametrizedPtychoModel(PtychoModel):
         update = model_params["update_params"]["probe"]
         defaults = set(default_coefficients())
         rates = []
+        configured_rates = []
         for name in self.probe_generator.names:
             override = overrides.get(name, {})
             trainable = override.get("trainable", True) and (name in defaults or name in overrides)
-            lr = override.get("lr")
-            lr = update["lr"] if lr is None else lr
-            active = trainable and lr > 0 and update.get("start_iter") is not None
-            rates.append(lr if active else 0.0)
+            explicit_lr = override.get("lr")
+            configured_lr = update["lr"] if explicit_lr is None else explicit_lr
+            active = trainable and configured_lr > 0 and update.get("start_iter") is not None
+            configured_rates.append(configured_lr if active else 0.0)
+            scale = (phase_normalized_lr_scale(name, geometry["conv_angle"])
+                     if explicit_lr is None else 1.0)
+            rates.append(configured_lr * scale if active else 0.0)
         key = "probe_coefficients"
         tensor = self.probe_generator.coefficients
-        rate_tensor = torch.tensor(rates, device=tensor.device, dtype=tensor.dtype)
-        self.probe_generator.trainable_mask.copy_(rate_tensor > 0)
-        group_lr = max(rates)
+        self.probe_generator.trainable_mask.copy_(
+            torch.tensor([rate > 0 for rate in rates], device=tensor.device))
+        # Keep the configured probe LR as the optimizer LR. The step hook applies
+        # potentially much larger high-order multipliers after optimizer.step().
+        group_lr = max(configured_rates)
         self.optimizable_tensors[key] = tensor
         self.lr_params[key] = group_lr
         self.start_iter[key] = update.get("start_iter") if group_lr > 0 else None
@@ -109,7 +123,7 @@ class ParametrizedPtychoModel(PtychoModel):
         self.create_optimizable_params_dict(self.lr_params)
         for group in self.optimizable_params:
             if group['params'][0] is tensor:
-                group['probe_update_scale'] = (rate_tensor / group_lr).tolist()
+                group['probe_update_scale'] = [rate / group_lr for rate in rates]
         if self.optimizer_params['name'] == 'LBFGS' and len(set(r for r in rates if r > 0)) > 1:
             raise ValueError("LBFGS requires one shared learning rate for the probe coefficient tensor")
         self.init_compilation_iters()
@@ -118,6 +132,12 @@ class ParametrizedPtychoModel(PtychoModel):
         if hasattr(self, "probe_generator"):
             return self.probe_generator()
         return super().get_complex_probe_view()
+
+    def record_probe_coefficients(self, niter):
+        values = self.probe_generator.current_coefficients().detach().cpu().tolist()
+        self.probe_coefficient_iters['niter'].append(niter)
+        for name, value in zip(self.probe_generator.names, values):
+            self.probe_coefficient_iters['coefficients'][name].append(value)
 
     def export_parametrized_probe(self):
         state = self.probe_generator.export()

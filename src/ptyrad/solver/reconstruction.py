@@ -121,6 +121,10 @@ def create_optimizer(optimizer_params, optimizable_params):
         optimizable_params = [p['params'][0] for p in optimizable_params if p['params'][0].requires_grad] # LBFGS only takes 1 params group as an iterable
 
     optimizer = optimizer_class(optimizable_params, **optimizer_configs)
+    # Optimizer checkpoints contain the step-hook scales in their parameter groups.
+    # Recompute them from the current model so older checkpoints adopt the current
+    # coefficient normalization while retaining their optimizer moments.
+    probe_update_scales = [group.get('probe_update_scale') for group in optimizer.param_groups]
     
     if ptyrad_path is not None and isinstance(ptyrad_path, str):
         try:
@@ -130,6 +134,9 @@ def create_optimizer(optimizer_params, optimizable_params):
             # Convert 'state' to tensors on the right device, while 'param_groups' are kept as generic scalars/arrays/boolean/None/list of int
             optim_state_dict['state'] = ndarrays_to_tensors(optim_state_dict['state'], device=device) 
             optimizer.load_state_dict(optim_state_dict)
+            for group, scale in zip(optimizer.param_groups, probe_update_scales):
+                if scale is not None:
+                    group['probe_update_scale'] = scale
             logger.info(f"Loaded optimizer state from '{ptyrad_path}'")
         except Exception as e:
             logger.info(f"Failed to load optimizer state from '{ptyrad_path}': {e}. Using fresh optimizer.")
@@ -739,6 +746,8 @@ def recon_step(batches, grad_accumulation, model, optimizer, scheduler, loss_fn,
     model_instance.avg_tilt_iters['niter'].append(niter)
     model_instance.avg_tilt_iters['tilt_y'].append(float(avg_tilts[0]))
     model_instance.avg_tilt_iters['tilt_x'].append(float(avg_tilts[1]))
+    if hasattr(model_instance, 'record_probe_coefficients'):
+        model_instance.record_probe_coefficients(niter)
     logger.info(f" Estimated remaining time: {parse_sec_to_time_str(iter_t * (NITER - niter))}")
     return batch_losses
 

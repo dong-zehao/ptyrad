@@ -4,12 +4,15 @@ Plotting functions related to PyTorch models
 # This isolates the heavy torch import (3-6 sec) and is not promoted via __init__
 
 import logging
+from math import ceil
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 import torch
 
 from ptyrad.io.save import safe_filename
+from ptyrad.params.probe_params import coefficient_order
 
 from .basic import (
     plot_convergence_dashboard,
@@ -25,6 +28,33 @@ from .basic import (
 from ptyrad.utils.affine import fit_scan_affine
 
 logger = logging.getLogger(__name__)
+
+def plot_probe_coefficient_curves(history):
+    """Plot physical aberration coefficients, with one panel per order."""
+    iterations = history['niter']
+    coefficients = history['coefficients']
+    names = sorted(coefficients, key=coefficient_order)
+    orders = sorted({coefficient_order(name)[0] for name in names})
+    if not iterations or not orders:
+        return None
+
+    ncols = min(2, len(orders))
+    nrows = ceil(len(orders) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, 3.8 * nrows), squeeze=False)
+    for ax, order in zip(axes.flat, orders):
+        order_names = [name for name in names if coefficient_order(name)[0] == order]
+        for name in order_names:
+            ax.plot(iterations, coefficients[name], label=name, linewidth=1.4,
+                    marker='o' if len(iterations) <= 2 else None)
+        ax.set(title=f'Order {order}', xlabel='Iteration', ylabel='Coefficient (Å)')
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8, ncol=2 if len(order_names) > 4 else 1)
+    for ax in list(axes.flat)[len(orders):]:
+        ax.set_visible(False)
+    fig.suptitle('Probe aberration coefficients', fontsize=16)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    return fig
 
 def plot_summary(output_path, model, niter, indices, init_variables, selected_figs=['loss', 'forward', 'probe_r_amp', 'probe_k_amp', 'probe_k_phase', 'pos'], collate_str='', show_fig=True, save_fig=False):
     """ Wrapper function for most visualization function """
@@ -97,6 +127,18 @@ def plot_summary(output_path, model, niter, indices, init_variables, selected_fi
             fig_probe_modes_fourier_phase.show()
         if save_fig:
             fig_probe_modes_fourier_phase.savefig(safe_filename(output_path + f"/summary_probe_modes_fourier_phase{collate_str}{iter_str}.png"),bbox_inches='tight')
+
+    probe_selected = any(name in selected_figs for name in
+                         ('probe_r_amp', 'probe_k_amp', 'probe_k_phase', 'all'))
+    if probe_selected and hasattr(model, 'probe_coefficient_iters'):
+        fig_coefficients = plot_probe_coefficient_curves(model.probe_coefficient_iters)
+        if fig_coefficients is not None:
+            if show_fig:
+                fig_coefficients.show()
+            if save_fig:
+                fig_coefficients.savefig(safe_filename(
+                    output_path + f"/summary_probe_coefficients{collate_str}{iter_str}.png"),
+                    bbox_inches='tight')
             
             
     # Scan positions and tilts

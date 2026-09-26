@@ -12,6 +12,7 @@ from ptyrad.optics.probe import make_stem_probe
 from ptyrad.optics.propagator import near_field_evolution
 from ptyrad.params.model_params import ModelParams
 from ptyrad.params.probe_params import ProbeParams
+from ptyrad.plotting.model import plot_probe_coefficient_curves, plot_summary
 from ptyrad.core.models.parametrized import (
     ParametrizedPtychoModel, create_ptycho_model, prepare_parametrized_params,
 )
@@ -73,6 +74,47 @@ def fixture_model(overrides=None, start=1, end=None, state=None):
     return ParametrizedPtychoModel(values, params, init_params, state=state), values, params, init_params
 
 
+def uniform_rate_overrides():
+    return {name: {'lr': 1.} for name in default_coefficients()}
+
+
+def test_default_rates_normalize_aperture_edge_phase():
+    model, values, params, init = fixture_model()
+    group = model.optimizable_params[0]
+    scales = dict(zip(model.probe_generator.names, group['probe_update_scale']))
+    alpha = init['probe_conv_angle'] / 1000
+    assert group['lr'] == 1.
+    for name in ('C10', 'C12a', 'C21b', 'C30', 'C32a', 'C50', 'C56b'):
+        order = int(name[1])
+        assert scales[name] == pytest.approx((order + 1) / 2 * alpha ** (1 - order))
+
+    # The step hook scales Adam's actual update, not its input gradient.
+    vector = model.probe_generator.coefficients
+    optimizer = create_optimizer(model.optimizer_params, model.optimizable_params)
+    vector.grad = torch.ones_like(vector)
+    optimizer.step()
+    for name in ('C10', 'C30', 'C50'):
+        assert vector[model.probe_generator.names.index(name)].item() == pytest.approx(
+            -scales[name], rel=1e-5)
+
+    init['probe_conv_angle'] = 20
+    narrower = ParametrizedPtychoModel(values, params, init)
+    narrower_scales = dict(zip(narrower.probe_generator.names,
+                               narrower.optimizable_params[0]['probe_update_scale']))
+    assert narrower_scales['C30'] == pytest.approx(2 / .02 ** 2)
+
+
+def test_explicit_rates_replace_default_normalization():
+    model, _, _, _ = fixture_model({'C30': {'lr': 7.}, 'C50': {'lr': 0.}})
+    group = model.optimizable_params[0]
+    scales = dict(zip(model.probe_generator.names, group['probe_update_scale']))
+    assert group['lr'] == 7.
+    assert scales['C10'] == pytest.approx(1 / 7)
+    assert scales['C30'] == pytest.approx(1.)
+    assert scales['C32a'] == pytest.approx(3200 / 7)
+    assert scales['C50'] == 0
+
+
 def test_defaults_overrides_and_schedule():
     model, _, _, _ = fixture_model({'C30': {'trainable': False}, 'C10': {'lr': 2.}, 'C12a': {'lr': 0.}}, start=2, end=4)
     assert len(model.optimizable_params) == 1
@@ -88,7 +130,9 @@ def test_defaults_overrides_and_schedule():
 
 
 def test_reconstruction_backward_and_checkpoint(tmp_path):
-    model, values, params, init_params = fixture_model({'C30': {'trainable': False}})
+    overrides = uniform_rate_overrides()
+    overrides['C30'] = {'trainable': False}
+    model, values, params, init_params = fixture_model(overrides)
     indices = torch.tensor([0, 1])
     with torch.no_grad():
         model.probe_generator.coefficients[model.probe_generator.names.index('C10')].fill_(25)
@@ -108,14 +152,17 @@ def test_reconstruction_backward_and_checkpoint(tmp_path):
     assert model.get_complex_probe_view().abs().square().sum().item() == pytest.approx(100, rel=1e-5)
 
     path = tmp_path / 'probe.hdf5'
+    old_optimizer_state = deepcopy(optimizer.state_dict())
+    old_optimizer_state['param_groups'][0]['probe_update_scale'] = [0.] * len(model.probe_generator.names)
     save_dict_to_hdf5({'parametrized_probe': model.export_parametrized_probe(),
-                       'optim_state_dict': optimizer.state_dict()}, str(path))
+                       'optim_state_dict': old_optimizer_state}, str(path))
     state = load_ptyrad(str(path))['parametrized_probe']
     restored = ParametrizedPtychoModel(values, params, init_params, state=state)
     torch.testing.assert_close(restored.get_complex_probe_view(), model.get_complex_probe_view())
     restored_optimizer = create_optimizer({'name': 'Adam', 'configs': {}, 'load_state': str(path)},
                                           restored.optimizable_params)
     assert restored_optimizer.state  # Must not silently fall back to a fresh optimizer.
+    assert restored_optimizer.param_groups[0]['probe_update_scale'] == model.optimizable_params[0]['probe_update_scale']
     for current, optim in [(model, optimizer), (restored, restored_optimizer)]:
         optim.zero_grad()
         (current(indices) - target).square().mean().backward()
@@ -149,7 +196,9 @@ def test_configuration_and_preparation():
 
 @pytest.mark.parametrize('name,configs', [('AdamW', {'weight_decay': .3}), ('SGD', {'momentum': .9, 'weight_decay': .3})])
 def test_vector_updates_match_individual_rates(name, configs):
-    model, _, _, _ = fixture_model({'C30': {'trainable': False}, 'C10': {'lr': 2.}})
+    overrides = uniform_rate_overrides()
+    overrides.update({'C30': {'trainable': False}, 'C10': {'lr': 2.}})
+    model, _, _, _ = fixture_model(overrides)
     vector = model.probe_generator.coefficients
     with torch.no_grad():
         vector.copy_(torch.linspace(1, 2, vector.numel()))
@@ -181,7 +230,9 @@ def test_compiled_generator():
 
 
 def test_compiled_optimizer_preserves_vector_overrides():
-    model, _, _, _ = fixture_model({'C30': {'trainable': False}, 'C10': {'lr': 2.}})
+    overrides = uniform_rate_overrides()
+    overrides.update({'C30': {'trainable': False}, 'C10': {'lr': 2.}})
+    model, _, _, _ = fixture_model(overrides)
     optim = create_optimizer({'name': 'AdamW', 'configs': {'weight_decay': .1}}, model.optimizable_params)
     optim.step = torch.compile(optim.step, backend='aot_eager')
     vector = model.probe_generator.coefficients
@@ -218,6 +269,39 @@ def test_high_order_fixed_unless_selected():
     assert active.probe_generator.trainable_mask[active.probe_generator.names.index('C70')]
 
 
+def test_probe_coefficient_plot_groups_orders_and_requires_probe_selection(tmp_path):
+    import matplotlib.pyplot as plt
+
+    model, values, params, init = fixture_model()
+    with torch.no_grad():
+        model.probe_generator.coefficients[model.probe_generator.names.index('C30')] = 10000
+    model.record_probe_coefficients(1)
+    assert model.probe_coefficient_iters['niter'] == [0, 1]
+
+    fig = plot_probe_coefficient_curves(model.probe_coefficient_iters)
+    panels = [ax for ax in fig.axes if ax.get_visible()]
+    assert len(panels) == 5
+    assert {line.get_label() for line in panels[0].lines} == {'C10', 'C12a', 'C12b'}
+    assert 'C30' in {line.get_label() for line in panels[2].lines}
+    plt.close(fig)
+
+    values['pos_pre_affine'] = values['crop_pos'].copy()
+    plot_summary(str(tmp_path), model, 1, np.arange(2), values,
+                 selected_figs=['probe_r_amp'], show_fig=False, save_fig=True)
+    assert (tmp_path / 'summary_probe_coefficients_iter0001.png').is_file()
+
+    plot_summary(str(tmp_path), model, 2, np.arange(2), values,
+                 selected_figs=[], show_fig=False, save_fig=True)
+    assert not (tmp_path / 'summary_probe_coefficients_iter0002.png').exists()
+
+    params['probe_params']['parametrize'] = False
+    pixel_model = create_ptycho_model(SimpleNamespace(init_variables=values, init_params=init),
+                                      {'model_params': params})
+    plot_summary(str(tmp_path), pixel_model, 3, np.arange(2), values,
+                 selected_figs=['probe_r_amp'], show_fig=False, save_fig=True)
+    assert not (tmp_path / 'summary_probe_coefficients_iter0003.png').exists()
+
+
 def test_disabled_factory_keeps_pixel_model():
     _, values, params, init = fixture_model()
     params['probe_params']['parametrize'] = False
@@ -237,7 +321,8 @@ def test_solver_initialization_and_saved_results(minimal_params_dict, tmp_path):
     raw['init_params']['probe_aberrations'] = {'C10': .000123456789}
     raw['init_params']['probe_interpolate'] = None
     raw['model_params'] = {'probe_params': {'parametrize': True}}
-    raw['recon_params'].update(NITER=2, BATCH_SIZE={'size': 2}, selected_figs=[], save_result=['model', 'optim_state'])
+    raw['recon_params'].update(NITER=2, BATCH_SIZE={'size': 2},
+                               selected_figs=['probe_r_amp'], save_result=['model', 'optim_state'])
     config = tmp_path / 'params.yaml'
     config.write_text(yaml.safe_dump(raw), encoding='utf8')
     params = load_params(str(config))
@@ -246,6 +331,8 @@ def test_solver_initialization_and_saved_results(minimal_params_dict, tmp_path):
     assert solver.init.init_variables['probe'].shape[0] == 1
     assert params['init_params']['probe_pmode_max'] == 4  # Caller config is untouched.
     solver.reconstruct()
+    assert solver.reconstruct_results.probe_coefficient_iters['niter'] == [0, 1, 2]
+    assert len(list(tmp_path.rglob('summary_probe_coefficients_iter*.png'))) == 2
     paths = sorted(tmp_path.rglob('model_iter*.hdf5'))
     assert len(paths) == 2
     saved = load_ptyrad(str(paths[-1]))
