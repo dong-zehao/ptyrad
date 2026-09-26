@@ -134,7 +134,8 @@ def create_optimizer(optimizer_params, optimizable_params):
         except Exception as e:
             logger.info(f"Failed to load optimizer state from '{ptyrad_path}': {e}. Using fresh optimizer.")
     logger.info(" ")
-    return optimizer
+    from ptyrad.core.models.probe_optimizer import configure_probe_updates
+    return configure_probe_updates(optimizer)
 
 def create_scheduler(scheduler_params, optimizer):
     """

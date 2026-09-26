@@ -55,8 +55,13 @@ class ParametrizedProbe(nn.Module):
         # Real buffer supports DDP backends without complex buffer broadcast.
         self.register_buffer("transfer_ri", torch.view_as_real(
             torch.tensor(transfer, device=device, dtype=complex_dtype)))
-        self.coefficients = nn.ParameterDict({name: nn.Parameter(torch.tensor(
-            [values.get(name, 0.0)], device=device, dtype=dtype)) for name in self.names})
+        self.coefficients = nn.Parameter(torch.tensor(
+            [values.get(name, 0.0) for name in self.names], device=device, dtype=dtype))
+        self.register_buffer("fixed_coefficients", self.coefficients.detach().clone())
+        self.register_buffer("trainable_mask", torch.ones(len(self.names), device=device, dtype=torch.bool))
+
+    def current_coefficients(self):
+        return torch.where(self.trainable_mask, self.coefficients, self.fixed_coefficients)
 
     def from_values(self, values):
         chi = torch.einsum("c,cyx->yx", values, self.basis)
@@ -67,9 +72,8 @@ class ParametrizedProbe(nn.Module):
         return probe.unsqueeze(0)
 
     def forward(self):
-        # Length-one parameters preserve tensor-valued optimizer moments in HDF5.
-        return self.from_values(torch.cat([self.coefficients[name] for name in self.names]))
+        return self.from_values(self.current_coefficients())
 
     def export(self):
         return dict(geometry=self.geometry.copy(), coefficients={
-            name: value.detach().item() for name, value in self.coefficients.items()})
+            name: value for name, value in zip(self.names, self.current_coefficients().detach().cpu().tolist())})

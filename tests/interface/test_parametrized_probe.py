@@ -75,24 +75,26 @@ def fixture_model(overrides=None, start=1, end=None, state=None):
 
 def test_defaults_overrides_and_schedule():
     model, _, _, _ = fixture_model({'C30': {'trainable': False}, 'C10': {'lr': 2.}, 'C12a': {'lr': 0.}}, start=2, end=4)
-    assert len(model.optimizable_params) == 23
-    assert model.lr_params['probe_C10'] == 2
+    assert len(model.optimizable_params) == 1
+    assert model.probe_generator.coefficients.shape == (25,)
+    assert len(list(model.probe_generator.parameters())) == 1
+    assert model.lr_params['probe_coefficients'] == 2
     assert all('opt_probe' != name for name, _ in model.named_parameters())
     for iteration, active in [(1, False), (2, True), (3, True), (4, False)]:
         toggle_grad_requires(model, iteration)
-        assert model.probe_generator.coefficients['C10'].requires_grad is active
-        assert not model.probe_generator.coefficients['C30'].requires_grad
-        assert not model.probe_generator.coefficients['C12a'].requires_grad
+        assert model.probe_generator.coefficients[model.probe_generator.names.index('C10')].requires_grad is active
+        assert not model.probe_generator.trainable_mask[model.probe_generator.names.index('C30')]
+        assert not model.probe_generator.trainable_mask[model.probe_generator.names.index('C12a')]
 
 
 def test_reconstruction_backward_and_checkpoint(tmp_path):
     model, values, params, init_params = fixture_model({'C30': {'trainable': False}})
     indices = torch.tensor([0, 1])
     with torch.no_grad():
-        model.probe_generator.coefficients['C10'].fill_(25)
+        model.probe_generator.coefficients[model.probe_generator.names.index('C10')].fill_(25)
         target = model(indices).detach()
-        model.probe_generator.coefficients['C10'].zero_()
-    optimizer = torch.optim.Adam(model.optimizable_params)
+        model.probe_generator.coefficients[model.probe_generator.names.index('C10')].zero_()
+    optimizer = create_optimizer(model.optimizer_params, model.optimizable_params)
     losses = []
     for _ in range(20):
         optimizer.zero_grad()
@@ -101,7 +103,7 @@ def test_reconstruction_backward_and_checkpoint(tmp_path):
         loss.backward()
         optimizer.step()
     assert losses[-1] < losses[0]
-    assert model.probe_generator.coefficients['C30'].item() == 0
+    assert model.probe_generator.coefficients[model.probe_generator.names.index('C30')].item() == 0
     assert model.get_complex_probe_view().shape == (1, 16, 16)
     assert model.get_complex_probe_view().abs().square().sum().item() == pytest.approx(100, rel=1e-5)
 
@@ -145,12 +147,53 @@ def test_configuration_and_preparation():
         prepare_parametrized_params(params)
 
 
+@pytest.mark.parametrize('name,configs', [('AdamW', {'weight_decay': .3}), ('SGD', {'momentum': .9, 'weight_decay': .3})])
+def test_vector_updates_match_individual_rates(name, configs):
+    model, _, _, _ = fixture_model({'C30': {'trainable': False}, 'C10': {'lr': 2.}})
+    vector = model.probe_generator.coefficients
+    with torch.no_grad():
+        vector.copy_(torch.linspace(1, 2, vector.numel()))
+    reference = [torch.nn.Parameter(value.clone().reshape(1)) for value in vector.detach()]
+    rates = [0 if n == 'C30' else 2 if n == 'C10' else 1 for n in model.probe_generator.names]
+    actual = create_optimizer({'name': name, 'configs': configs}, model.optimizable_params)
+    expected = getattr(torch.optim, name)([{'params': [p], 'lr': rate} for p, rate in zip(reference, rates) if rate], **configs)
+    schedulers = [torch.optim.lr_scheduler.StepLR(o, step_size=1, gamma=.5) for o in (actual, expected)]
+    for _ in range(3):
+        actual.zero_grad()
+        expected.zero_grad()
+        vector.square().sum().backward()
+        sum(p.square().sum() for p, rate in zip(reference, rates) if rate).backward()
+        actual.step()
+        expected.step()
+        for scheduler in schedulers:
+            scheduler.step()
+        torch.testing.assert_close(vector, torch.cat(reference), rtol=1e-5, atol=1e-6)
+    assert len(actual.param_groups) == 1
+    assert len(actual.state) == 1
+
+
 def test_compiled_generator():
     probe = generator(dtype=torch.float32)
     compiled = torch.compile(probe, backend='aot_eager', fullgraph=True)
     torch.testing.assert_close(compiled(), probe())
     compiled().real.square().sum().backward()
     assert all(p.grad is not None for p in probe.parameters())
+
+
+def test_compiled_optimizer_preserves_vector_overrides():
+    model, _, _, _ = fixture_model({'C30': {'trainable': False}, 'C10': {'lr': 2.}})
+    optim = create_optimizer({'name': 'AdamW', 'configs': {'weight_decay': .1}}, model.optimizable_params)
+    optim.step = torch.compile(optim.step, backend='aot_eager')
+    vector = model.probe_generator.coefficients
+    frozen = model.probe_generator.names.index('C30')
+    with torch.no_grad():
+        vector.fill_(1.)
+    for _ in range(2):
+        optim.zero_grad()
+        vector.square().sum().backward()
+        optim.step()
+    assert vector[frozen].item() == 1.
+    assert vector[0].item() != 1.
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA unavailable')
@@ -161,19 +204,18 @@ def test_cuda_forward_backward():
     weight = torch.randn_like(cpu().real)
     (cpu().real * weight).sum().backward()
     (gpu().real * weight.cuda()).sum().backward()
-    for name in cpu.names:
-        torch.testing.assert_close(gpu.coefficients[name].grad.cpu(), cpu.coefficients[name].grad,
-                                   atol=1e-6, rtol=1e-4)
+    torch.testing.assert_close(gpu.coefficients.grad.cpu(), cpu.coefficients.grad,
+                               atol=1e-6, rtol=1e-4)
 
 
 def test_high_order_fixed_unless_selected():
     model, values, params, init = fixture_model()
     init['probe_aberrations'] = {'C70': 1000}
     fixed = ParametrizedPtychoModel(values, params, init)
-    assert not fixed.probe_generator.coefficients['C70'].requires_grad
+    assert not fixed.probe_generator.trainable_mask[fixed.probe_generator.names.index('C70')]
     params['probe_params']['coefficients']['C70'] = {'lr': 5}
     active = ParametrizedPtychoModel(values, params, init)
-    assert active.probe_generator.coefficients['C70'].requires_grad
+    assert active.probe_generator.trainable_mask[active.probe_generator.names.index('C70')]
 
 
 def test_disabled_factory_keeps_pixel_model():
@@ -193,6 +235,7 @@ def test_solver_initialization_and_saved_results(minimal_params_dict, tmp_path):
     raw = deepcopy(minimal_params_dict)
     np.ones((4, 8, 8), dtype='float32').tofile(raw['init_params']['meas_params']['path'])
     raw['init_params']['probe_aberrations'] = {'C10': .000123456789}
+    raw['init_params']['probe_interpolate'] = None
     raw['model_params'] = {'probe_params': {'parametrize': True}}
     raw['recon_params'].update(NITER=2, BATCH_SIZE={'size': 2}, selected_figs=[], save_result=['model', 'optim_state'])
     config = tmp_path / 'params.yaml'

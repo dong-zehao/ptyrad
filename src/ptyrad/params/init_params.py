@@ -1201,6 +1201,8 @@ class InitParams(BaseModel):
         This can be used to interactively check whether the ``meas_flipT`` is correct.
     """
 
+    probe_interpolate: Optional[Dict[str, Any]] = Field(default=None, description="Optional probe interpolation; null disables interpolation")
+
     probe_permute: Optional[List[int]] = Field(default=None, description="Permutation for probe")
     """
     Applies additional permutation (reorder axes) to the loaded probe array with a list of ints. 

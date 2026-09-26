@@ -88,19 +88,30 @@ class ParametrizedPtychoModel(PtychoModel):
         self.end_iter["probe"] = None
         update = model_params["update_params"]["probe"]
         defaults = set(default_coefficients())
-        for name, tensor in self.probe_generator.coefficients.items():
+        rates = []
+        for name in self.probe_generator.names:
             override = overrides.get(name, {})
             trainable = override.get("trainable", True) and (name in defaults or name in overrides)
             lr = override.get("lr")
             lr = update["lr"] if lr is None else lr
             active = trainable and lr > 0 and update.get("start_iter") is not None
-            key = f"probe_{name}"
-            self.optimizable_tensors[key] = tensor
-            self.lr_params[key] = lr if active else 0.0
-            self.start_iter[key] = update.get("start_iter") if active else None
-            self.end_iter[key] = update.get("end_iter") if active else None
+            rates.append(lr if active else 0.0)
+        key = "probe_coefficients"
+        tensor = self.probe_generator.coefficients
+        rate_tensor = torch.tensor(rates, device=tensor.device, dtype=tensor.dtype)
+        self.probe_generator.trainable_mask.copy_(rate_tensor > 0)
+        group_lr = max(rates)
+        self.optimizable_tensors[key] = tensor
+        self.lr_params[key] = group_lr
+        self.start_iter[key] = update.get("start_iter") if group_lr > 0 else None
+        self.end_iter[key] = update.get("end_iter") if group_lr > 0 else None
         self.probe_int_sum = self.get_complex_probe_view().detach().abs().square().sum()
         self.create_optimizable_params_dict(self.lr_params)
+        for group in self.optimizable_params:
+            if group['params'][0] is tensor:
+                group['probe_update_scale'] = (rate_tensor / group_lr).tolist()
+        if self.optimizer_params['name'] == 'LBFGS' and len(set(r for r in rates if r > 0)) > 1:
+            raise ValueError("LBFGS requires one shared learning rate for the probe coefficient tensor")
         self.init_compilation_iters()
 
     def get_complex_probe_view(self):
@@ -113,6 +124,7 @@ class ParametrizedPtychoModel(PtychoModel):
         state["config"] = self.probe_config
         state["update_params"] = self.probe_update
         state["parameter_groups"] = [name for name, lr in self.lr_params.items() if lr != 0]
+        state["coefficient_names"] = self.probe_generator.names
         return state
 
     def print_model_summary(self):
@@ -139,6 +151,10 @@ def create_ptycho_model(init, params, device="cpu"):
         saved = load_ptyrad(optim_path).get(STATE_KEY)
         if saved is None or list(saved["parameter_groups"]) != model.export_parametrized_probe()["parameter_groups"]:
             raise ValueError("Optimizer checkpoint has incompatible parametrized probe parameter groups")
+        if list(saved.get('coefficient_names', [])) != model.probe_generator.names:
+            raise ValueError("Optimizer checkpoint has incompatible probe coefficient ordering")
+        if saved['config'] != model.probe_config or saved['update_params'] != model.probe_update:
+            raise ValueError("Optimizer checkpoint has incompatible probe training settings")
         for key, value in model.probe_generator.geometry.items():
             if not np.isclose(value, saved['geometry'][key], rtol=1e-6, atol=0):
                 raise ValueError(f"Optimizer checkpoint probe geometry mismatch: {key}")
