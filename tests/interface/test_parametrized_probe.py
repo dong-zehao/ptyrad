@@ -54,7 +54,7 @@ def test_all_zero_coefficients_have_correct_gradients():
         assert jac.abs().max() > 0
 
 
-def fixture_model(overrides=None, start=1, end=None, state=None, lr_gamma=0.25):
+def fixture_model(overrides=None, start=1, end=None, state=None):
     torch.manual_seed(2)
     n = 16
     init_params = dict(probe_conv_angle=25, probe_aberrations={}, probe_z_shift=0)
@@ -70,7 +70,7 @@ def fixture_model(overrides=None, start=1, end=None, state=None, lr_gamma=0.25):
     for update in params['update_params'].values():
         update.update(lr=0., start_iter=None)
     params['update_params']['probe'].update(lr=1., start_iter=start, end_iter=end)
-    params['probe_params'] = dict(parametrize=True, lr_gamma=lr_gamma,
+    params['probe_params'] = dict(parametrize=True,
                                   coefficients=overrides or {})
     return ParametrizedPtychoModel(values, params, init_params, state=state), values, params, init_params
 
@@ -79,71 +79,73 @@ def uniform_rate_overrides():
     return {name: {'lr': 1.} for name in default_coefficients()}
 
 
-def test_default_rates_apply_gamma_to_aperture_edge_normalization():
-    model, values, params, init = fixture_model()
-    group = model.optimizable_params[0]
-    scales = dict(zip(model.probe_generator.names, group['probe_update_scale']))
-    alpha = init['probe_conv_angle'] / 1000
-    assert group['lr'] == 1.
-    for name in ('C10', 'C12a', 'C21b', 'C30', 'C32a', 'C50', 'C56b'):
-        order = int(name[1])
-        assert scales[name] == pytest.approx(((order + 1) / 2 * alpha ** (1 - order)) ** 0.25)
-
-    # The step hook scales Adam's actual update, not its input gradient.
-    vector = model.probe_generator.coefficients
-    optimizer = create_optimizer(model.optimizer_params, model.optimizable_params)
-    vector.grad = torch.ones_like(vector)
-    optimizer.step()
+def test_normalized_coordinates_balance_phase_and_gradient_scales():
+    probe = generator(dtype=torch.float64)
     for name in ('C10', 'C30', 'C50'):
-        assert vector[model.probe_generator.names.index(name)].item() == pytest.approx(
-            -scales[name], rel=1e-5)
-
-    init['probe_conv_angle'] = 20
-    narrower = ParametrizedPtychoModel(values, params, init)
-    narrower_scales = dict(zip(narrower.probe_generator.names,
-                               narrower.optimizable_params[0]['probe_update_scale']))
-    assert narrower_scales['C30'] == pytest.approx((2 / .02 ** 2) ** 0.25)
-
-    full, _, _, _ = fixture_model(lr_gamma=1.)
-    full_scales = dict(zip(full.probe_generator.names,
-                           full.optimizable_params[0]['probe_update_scale']))
-    assert full_scales['C30'] == pytest.approx(3200.)
+        index = probe.names.index(name)
+        normalized_basis = probe.basis[index] / probe.phase_per_angstrom[index]
+        n = int(name[1])
+        # At a common pupil radius, relative strengths depend on radius, not alpha**n.
+        k = torch.fft.fftshift(torch.fft.fftfreq(16, d=.2, dtype=torch.float64))
+        radius = k.abs() * probe.geometry['wavelength'] / .025
+        torch.testing.assert_close(normalized_basis[8], radius ** (n + 1))
+    q = probe.normalized_coefficients.detach().clone().requires_grad_()
+    assert torch.autograd.gradcheck(
+        lambda x: torch.view_as_real(probe.from_values(x / probe.phase_per_angstrom)),
+        (q,), eps=1e-6, atol=1e-5, rtol=1e-4)
 
 
-def test_explicit_rates_replace_default_normalization():
+def test_default_and_override_rates_are_in_phase_radians():
     model, _, _, _ = fixture_model({'C30': {'lr': 7.}, 'C50': {'lr': 0.}})
     group = model.optimizable_params[0]
     scales = dict(zip(model.probe_generator.names, group['probe_update_scale']))
     assert group['lr'] == 7.
     assert scales['C10'] == pytest.approx(1 / 7)
     assert scales['C30'] == pytest.approx(1.)
-    assert scales['C32a'] == pytest.approx(3200 ** 0.25 / 7)
+    assert scales['C32a'] == pytest.approx(1 / 7)
     assert scales['C50'] == 0
+
+
+def test_large_physical_coefficient_updates_without_roundoff_stall():
+    model, values, params, init = fixture_model()
+    init['probe_aberrations'] = {'C50': -1.85e7}
+    params['update_params']['probe']['lr'] = 1e-4
+    model = ParametrizedPtychoModel(values, params, init)
+    gen = model.probe_generator
+    i = gen.names.index('C50')
+    before = gen.current_coefficients().detach().clone()
+    opt = create_optimizer(model.optimizer_params, model.optimizable_params)
+    gen.normalized_coefficients.grad = torch.ones_like(gen.normalized_coefficients)
+    opt.step()
+    change = gen.current_coefficients().detach() - before
+    assert abs(change[i].item()) > 1000
+    assert change[i].item() == pytest.approx(-1e-4 / gen.phase_per_angstrom[i].item(), rel=.002)
+
 
 
 def test_defaults_overrides_and_schedule():
     model, _, _, _ = fixture_model({'C30': {'trainable': False}, 'C10': {'lr': 2.}, 'C12a': {'lr': 0.}}, start=2, end=4)
     assert len(model.optimizable_params) == 1
-    assert model.probe_generator.coefficients.shape == (25,)
+    assert model.probe_generator.normalized_coefficients.shape == (25,)
     assert len(list(model.probe_generator.parameters())) == 1
-    assert model.lr_params['probe_coefficients'] == 2
+    assert model.lr_params['probe_normalized_coefficients'] == 2
     assert all('opt_probe' != name for name, _ in model.named_parameters())
     for iteration, active in [(1, False), (2, True), (3, True), (4, False)]:
         toggle_grad_requires(model, iteration)
-        assert model.probe_generator.coefficients[model.probe_generator.names.index('C10')].requires_grad is active
+        assert model.probe_generator.normalized_coefficients[model.probe_generator.names.index('C10')].requires_grad is active
         assert not model.probe_generator.trainable_mask[model.probe_generator.names.index('C30')]
         assert not model.probe_generator.trainable_mask[model.probe_generator.names.index('C12a')]
 
 
 def test_reconstruction_backward_and_checkpoint(tmp_path):
-    overrides = uniform_rate_overrides()
+    overrides = {name: {'lr': .01} for name in default_coefficients()}
     overrides['C30'] = {'trainable': False}
     model, values, params, init_params = fixture_model(overrides)
     indices = torch.tensor([0, 1])
     with torch.no_grad():
-        model.probe_generator.coefficients[model.probe_generator.names.index('C10')].fill_(25)
+        model.probe_generator.normalized_coefficients[model.probe_generator.names.index('C10')].fill_(.25)
         target = model(indices).detach()
-        model.probe_generator.coefficients[model.probe_generator.names.index('C10')].zero_()
+        model.probe_generator.normalized_coefficients[model.probe_generator.names.index('C10')].zero_()
     optimizer = create_optimizer(model.optimizer_params, model.optimizable_params)
     losses = []
     for _ in range(20):
@@ -153,7 +155,7 @@ def test_reconstruction_backward_and_checkpoint(tmp_path):
         loss.backward()
         optimizer.step()
     assert losses[-1] < losses[0]
-    assert model.probe_generator.coefficients[model.probe_generator.names.index('C30')].item() == 0
+    assert model.probe_generator.normalized_coefficients[model.probe_generator.names.index('C30')].item() == 0
     assert model.get_complex_probe_view().shape == (1, 16, 16)
     assert model.get_complex_probe_view().abs().square().sum().item() == pytest.approx(100, rel=1e-5)
 
@@ -182,15 +184,15 @@ def test_reconstruction_backward_and_checkpoint(tmp_path):
 
 def test_configuration_and_preparation():
     assert not ModelParams().probe_params.parametrize
-    assert ProbeParams().lr_gamma == 0.25
+    assert 'lr_gamma' not in ProbeParams.model_fields
+    with pytest.raises(ValueError):
+        ProbeParams(lr_gamma=.25)
     for name in ['C12', 'phi12', 'Cs', 'C10a', 'C11a']:
         with pytest.raises(ValueError):
             ProbeParams(coefficients={name: {}})
     for lr in [-1, float('nan'), float('inf')]:
         with pytest.raises(ValueError):
             ProbeParams(coefficients={'C10': {'lr': lr}})
-        with pytest.raises(ValueError):
-            ProbeParams(lr_gamma=lr)
     params = dict(model_params={'probe_params': {'parametrize': True}},
                   init_params={'probe_pmode_max': 4},
                   constraint_params={key: {'start_iter': 1} for key in
@@ -208,7 +210,7 @@ def test_vector_updates_match_individual_rates(name, configs):
     overrides = uniform_rate_overrides()
     overrides.update({'C30': {'trainable': False}, 'C10': {'lr': 2.}})
     model, _, _, _ = fixture_model(overrides)
-    vector = model.probe_generator.coefficients
+    vector = model.probe_generator.normalized_coefficients
     with torch.no_grad():
         vector.copy_(torch.linspace(1, 2, vector.numel()))
     reference = [torch.nn.Parameter(value.clone().reshape(1)) for value in vector.detach()]
@@ -244,7 +246,7 @@ def test_compiled_optimizer_preserves_vector_overrides():
     model, _, _, _ = fixture_model(overrides)
     optim = create_optimizer({'name': 'AdamW', 'configs': {'weight_decay': .1}}, model.optimizable_params)
     optim.step = torch.compile(optim.step, backend='aot_eager')
-    vector = model.probe_generator.coefficients
+    vector = model.probe_generator.normalized_coefficients
     frozen = model.probe_generator.names.index('C30')
     with torch.no_grad():
         vector.fill_(1.)
@@ -264,7 +266,7 @@ def test_cuda_forward_backward():
     weight = torch.randn_like(cpu().real)
     (cpu().real * weight).sum().backward()
     (gpu().real * weight.cuda()).sum().backward()
-    torch.testing.assert_close(gpu.coefficients.grad.cpu(), cpu.coefficients.grad,
+    torch.testing.assert_close(gpu.normalized_coefficients.grad.cpu(), cpu.normalized_coefficients.grad,
                                atol=1e-6, rtol=1e-4)
 
 
@@ -283,7 +285,8 @@ def test_probe_coefficient_plot_groups_orders_and_requires_probe_selection(tmp_p
 
     model, values, params, init = fixture_model()
     with torch.no_grad():
-        model.probe_generator.coefficients[model.probe_generator.names.index('C30')] = 10000
+        model.probe_generator.normalized_coefficients[model.probe_generator.names.index('C30')] = (
+            10000 * model.probe_generator.phase_per_angstrom[model.probe_generator.names.index('C30')])
     model.record_probe_coefficients(1)
     assert model.probe_coefficient_iters['niter'] == [0, 1]
 
@@ -353,3 +356,64 @@ def test_solver_initialization_and_saved_results(minimal_params_dict, tmp_path):
     resumed = PtyRADSolver(resumed_params, device='cpu')
     resumed_model = create_ptycho_model(resumed.init, resumed.params)
     torch.testing.assert_close(resumed_model.get_complex_probe_view(), solver.reconstruct_results.get_complex_probe_view())
+
+
+def test_legacy_coefficients_load_but_optimizer_coordinates_are_rejected(tmp_path):
+    model, values, params, init = fixture_model()
+    legacy = model.export_parametrized_probe()
+    legacy.pop('parameterization')
+    legacy['coefficients']['C50'] = -1.85e7
+    restored = ParametrizedPtychoModel(values, params, init, state=legacy)
+    assert restored.probe_generator.export()['coefficients']['C50'] == pytest.approx(-1.85e7)
+    path = tmp_path / 'legacy.hdf5'
+    save_dict_to_hdf5({'parametrized_probe': legacy}, str(path))
+    with pytest.raises(ValueError, match='incompatible probe coordinates'):
+        create_optimizer({'name': 'Adam', 'load_state': str(path)}, restored.optimizable_params)
+    params['optimizer_params']['load_state'] = str(path)
+    with pytest.raises(ValueError, match='legacy Angstrom'):
+        create_ptycho_model(SimpleNamespace(init_variables=values, init_params=init),
+                           {'model_params': params})
+
+
+def test_lbfgs_default_phase_rates_and_single_high_order_coefficient():
+    _, values, params, init = fixture_model()
+    params['optimizer_params'] = {'name': 'LBFGS', 'configs': {'max_iter': 1}}
+    # No order-dependent rates: the default model is accepted by LBFGS.
+    ParametrizedPtychoModel(values, params, init)
+    params['probe_params']['coefficients'] = {
+        name: {'trainable': name == 'C30'} for name in default_coefficients()}
+    model = ParametrizedPtychoModel(values, params, init)
+    opt = create_optimizer(model.optimizer_params, model.optimizable_params)
+    q = model.probe_generator.normalized_coefficients
+    i = model.probe_generator.names.index('C30')
+    def closure():
+        opt.zero_grad()
+        loss = (q[i] - 2).square()
+        loss.backward()
+        return loss
+    opt.step(closure)
+    assert q[i].item() == pytest.approx(1.)
+    assert torch.count_nonzero(q).item() == 1
+
+
+def test_high_order_phase_fit_has_useful_gradients():
+    probe = generator(dtype=torch.float32)
+    i = probe.names.index('C50')
+    with torch.no_grad():
+        probe.normalized_coefficients[i] = .2
+        target = probe().detach()
+        probe.normalized_coefficients.zero_()
+    probe.trainable_mask.zero_()
+    probe.trainable_mask[i] = True
+    opt = torch.optim.Adam(probe.parameters(), lr=.01)
+    losses = []
+    for _ in range(40):
+        opt.zero_grad()
+        loss = (probe() - target).abs().square().sum()
+        losses.append(loss.item())
+        loss.backward()
+        if len(losses) == 1:
+            assert probe.normalized_coefficients.grad[i].abs().item() > 1e-5
+        opt.step()
+    assert losses[-1] < losses[0] * .05
+    assert probe.normalized_coefficients[i].item() == pytest.approx(.2, abs=.03)

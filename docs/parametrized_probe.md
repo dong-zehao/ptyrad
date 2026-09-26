@@ -6,28 +6,33 @@ Add this to an existing electron reconstruction configuration:
 model_params:
   probe_params:
     parametrize: true
-    lr_gamma: 0.25
     coefficients: {}
   update_params:
-    probe: {start_iter: 1, lr: 1.0}
+    probe: {start_iter: 1, lr: 0.001}
 ```
 
 The default is `parametrize: false`. With the option enabled, all 25 Cartesian
 coefficients in the first through fifth order aberration specification are
-optimized, including coefficients initially zero. All coefficients are stored in
-one trainable tensor of shape `(25,)` (extended when higher orders are included),
-with one optimizer parameter group and tensor-valued optimizer state. Names map
-to entries in the saved `coefficient_names` list. Initial values are read from
-`init_params.probe_aberrations`, using its existing aliases and units. The
-learning rate above is an example, in Angstrom per C10 update; the pixel-probe
-learning rate may be too small for useful coefficient refinement. For aberration
-order `n` and probe convergence semi-angle `alpha` in radians, the automatic
-multiplier is `((n + 1) / 2 * alpha ** (1 - n)) ** lr_gamma`. The default
-`lr_gamma` is `0.25`; set it to `1` for full aperture-edge phase normalization
-or `0` for the same learning rate across orders. All angular components of the
-same order share the multiplier. At 25 mrad, the raw multipliers for orders 1
-through 5 are 1, 60, 3200, 160000, and 7680000; `lr_gamma` raises each to
-the chosen power.
+optimized, including coefficients initially zero. The trainable tensor
+`normalized_coefficients` has shape `(25,)` (extended for higher orders).
+For each physical Cartesian coefficient `C_nm` in Angstroms, it stores
+
+```
+q_nm = C_nm * (2*pi / wavelength) * alpha**(n+1) / (n+1)
+```
+
+where wavelength is in Angstroms and alpha is the convergence semi-angle in
+radians. Thus `q_nm` is the angular-component amplitude of the aberration phase
+at the aperture edge, in radians. The forward pass converts `q_nm` back to
+Angstroms before generating the probe. Initialization, plots, and exported
+`parametrized_probe.coefficients` remain in Angstroms; the optimizer tensor and
+its moments use phase coordinates. This balances gradient scales across orders
+and avoids taking tiny Angstrom steps on large physical coefficients.
+
+Both `update_params.probe.lr` and coefficient-specific `lr` now act on phase
+coordinates, not Angstroms. The example above uses 0.001; retune old learning
+rates rather than copying their numerical values blindly. `lr_gamma` has been
+removed; remove it from existing configurations (validation rejects it).
 
 `coefficients` contains overrides, not initial values or an allowlist:
 
@@ -36,29 +41,31 @@ probe_params:
   parametrize: true
   coefficients:
     C30: {trainable: false}
-    C10: {lr: 2.0}
+    C10: {lr: 0.002}
     C12b: {lr: 0.0}
 ```
 
 Use canonical Cartesian names (`C10`, `C12a`, `C12b`, etc.). Other coefficients
 continue to optimize. Each inherits the start/end iterations and default learning
-rate from `update_params.probe`. An explicit coefficient `lr` uses that value
-directly, without the automatic order multiplier. `trainable: false`, zero
+rate from `update_params.probe`. An explicit coefficient `lr` overrides the phase-coordinate learning rate. `trainable: false`, zero
 coefficient learning rate, or a null probe start iteration freezes the
 corresponding coefficients.
 Valid higher-order terms supplied in the initial aberrations are fixed unless
 explicitly included in `coefficients`.
 
-Per-coefficient learning rates scale entries of the optimizer's actual update,
-not the gradients (which Adam would normalize). The normalization balances
-phase changes from equal-sized Adam updates; other optimizers may need different
-rates because their raw updates depend on gradient magnitude. Frozen entries
-remain unchanged even with weight decay or momentum. Use the standard
-solver/create_optimizer entry point to install these update hooks. LBFGS requires
-a shared effective learning rate, so the default normalization is incompatible
-with LBFGS unless all active coefficients have the same explicit `lr`.
-Old checkpoints with separate coefficient parameter groups can supply coefficient
-values, but their optimizer state cannot be resumed with the new vector layout.
+Per-coefficient learning rates scale entries of the optimizer's actual update
+in phase coordinates, not the gradients (which Adam would normalize).
+Frozen entries remain unchanged even with weight decay or momentum. Use the
+standard solver/create_optimizer entry point to install these override hooks.
+LBFGS requires a shared learning rate for active probe coefficients; the default
+configuration now satisfies this requirement. As in the pixel model, LBFGS uses
+a single global learning rate across all model parameters.
+
+Legacy checkpoints can supply physical coefficient values, which are converted
+to phase coordinates on load. Their optimizer moments cannot be resumed: omit
+`optimizer_params.load_state` and start a fresh optimizer (and scheduler).
+New checkpoints identify the coordinate system as `aperture_phase_radians_v1`
+and support optimizer-state restoration with matching geometry and settings.
 
 When `selected_figs` includes `probe_r_amp`, `probe_k_amp`, `probe_k_phase`, or
 `all`, each save interval also writes `summary_probe_coefficients_iterNNNN.png`.

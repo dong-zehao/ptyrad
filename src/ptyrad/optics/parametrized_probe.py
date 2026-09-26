@@ -14,16 +14,13 @@ def default_coefficients():
             for suffix in (("",) if m == 0 else ("a", "b"))]
 
 
-def phase_normalized_lr_scale(name, conv_angle, gamma=0.25):
-    """Scale a coefficient's aperture-edge phase normalization by gamma.
+PARAMETERIZATION = "aperture_phase_radians_v1"
 
-    The largest phase basis value at semi-angle alpha is proportional to
-    alpha ** (n + 1) / (n + 1), independent of the angular component.
-    """
+
+def phase_per_angstrom(name, conv_angle, wavelength):
+    """Aperture-edge phase amplitude (radians) per Angstrom of aberration."""
     n, _, _ = coefficient_order(name)
-    alpha = conv_angle / 1000  # mrad -> rad
-    raw = (n + 1) / 2 * alpha ** (1 - n)
-    return raw ** gamma
+    return 2 * np.pi / wavelength * (conv_angle / 1000) ** (n + 1) / (n + 1)
 
 
 class ParametrizedProbe(nn.Module):
@@ -67,13 +64,21 @@ class ParametrizedProbe(nn.Module):
         # Real buffer supports DDP backends without complex buffer broadcast.
         self.register_buffer("transfer_ri", torch.view_as_real(
             torch.tensor(transfer, device=device, dtype=complex_dtype)))
-        self.coefficients = nn.Parameter(torch.tensor(
-            [values.get(name, 0.0) for name in self.names], device=device, dtype=dtype))
-        self.register_buffer("fixed_coefficients", self.coefficients.detach().clone())
+        self.register_buffer("phase_per_angstrom", torch.tensor(
+            [phase_per_angstrom(name, conv_angle, wavelength) for name in self.names],
+            device=device, dtype=dtype))
+        initial = torch.tensor([values.get(name, 0.0) for name in self.names],
+                               device=device, dtype=dtype)
+        # Optimizer coordinates are aperture-edge phase amplitudes, not Angstroms.
+        self.normalized_coefficients = nn.Parameter(initial * self.phase_per_angstrom)
+        self.register_buffer("fixed_coefficients", initial.clone())
         self.register_buffer("trainable_mask", torch.ones(len(self.names), device=device, dtype=torch.bool))
 
     def current_coefficients(self):
-        return torch.where(self.trainable_mask, self.coefficients, self.fixed_coefficients)
+        """Return physical Cartesian coefficients in Angstroms."""
+        return torch.where(self.trainable_mask,
+                           self.normalized_coefficients / self.phase_per_angstrom,
+                           self.fixed_coefficients)
 
     def from_values(self, values):
         chi = torch.einsum("c,cyx->yx", values, self.basis)
@@ -87,5 +92,5 @@ class ParametrizedProbe(nn.Module):
         return self.from_values(self.current_coefficients())
 
     def export(self):
-        return dict(geometry=self.geometry.copy(), coefficients={
+        return dict(parameterization=PARAMETERIZATION, geometry=self.geometry.copy(), coefficients={
             name: value for name, value in zip(self.names, self.current_coefficients().detach().cpu().tolist())})

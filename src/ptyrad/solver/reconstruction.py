@@ -112,6 +112,8 @@ def create_optimizer(optimizer_params, optimizable_params):
     
     if optimizer_class is None:
         raise ValueError(f"Optimizer '{optimizer_name}' is not supported.")
+    probe_parameterization = next((g.get('probe_parameterization') for g in optimizable_params
+                                   if g.get('probe_parameterization')), None)
     if optimizer_name == 'LBFGS':
         logger.info("Note: LBFGS optimizer is a quasi-Newton 2nd order optimizer that will run multiple forward passes (default: 20) for 1 update step")
         logger.info("Note: LBFGS usually converges faster for convex problem with full-batch non-noisy gradients, but each update step is computationally slower")
@@ -121,12 +123,16 @@ def create_optimizer(optimizer_params, optimizable_params):
         optimizable_params = [p['params'][0] for p in optimizable_params if p['params'][0].requires_grad] # LBFGS only takes 1 params group as an iterable
 
     optimizer = optimizer_class(optimizable_params, **optimizer_configs)
-    # Optimizer checkpoints contain the step-hook scales in their parameter groups.
-    # Recompute them from the current model so older checkpoints adopt the current
-    # coefficient normalization while retaining their optimizer moments.
+    # Restore current override ratios after loading matching optimizer moments.
     probe_update_scales = [group.get('probe_update_scale') for group in optimizer.param_groups]
     
     if ptyrad_path is not None and isinstance(ptyrad_path, str):
+        if probe_parameterization is not None:
+            from ptyrad.io.load import load_ptyrad
+            saved_probe = load_ptyrad(ptyrad_path).get('parametrized_probe', {})
+            if saved_probe.get('parameterization') != probe_parameterization:
+                raise ValueError("Optimizer checkpoint uses incompatible probe coordinates; "
+                                 "load probe coefficients only and start a fresh optimizer")
         try:
             from ptyrad.io.load import load_ptyrad
             optim_state_dict = load_ptyrad(ptyrad_path)['optim_state_dict']
