@@ -222,6 +222,8 @@ def make_save_dict(output_path, model, params, optimizer, scheduler, niter, indi
                 'avg_losses'            : avg_losses
                 }
     
+    if hasattr(model, 'export_parametrized_probe'):
+        save_dict['parametrized_probe'] = model.export_parametrized_probe()
     return save_dict
 
 def save_dict_to_hdf5(

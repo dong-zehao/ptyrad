@@ -37,7 +37,8 @@ def load_params(file_path: str, validate: bool = True):
         
     # Additional correction for the probe aberrations in init_params (temporatily added for smooth transition to v0.1.0b13)
     if params_dict.get('init_params') is not None:
-        params_dict['init_params'] = normalize_probe_params(params_dict['init_params'])
+        parametrized = (params_dict.get('model_params') or {}).get('probe_params', {}).get('parametrize', False)
+        params_dict['init_params'] = normalize_probe_params(params_dict['init_params'], round_decimals=None if parametrized else 3)
     
     # Additional correction for model_params.obj_preblur_std (temporatily added for smooth transition to v0.1.0b13)
     if params_dict.get('model_params') is not None:
@@ -138,7 +139,7 @@ def load_py_params(file_path):
 
 ###### These are sanitization functions for backward compatibility #####
 
-def normalize_probe_params(init_params: Dict) -> Dict:
+def normalize_probe_params(init_params: Dict, round_decimals=3) -> Dict:
     """ Normalize probe params in `init_params` 
     This includes:
     - Migrate legacy keys (pre v0.1.0b13) like `probe_defocus`, `probe_c3`, `probe_c5` into `probe_aberrations`.
@@ -192,7 +193,7 @@ def normalize_probe_params(init_params: Dict) -> Dict:
     
     # --- STEP 2: Canonicalization (The "Clean" Phase) ---
     if aberrations:
-        init_params['probe_aberrations'] = Aberrations(aberrations).export(notation='krivanek', style='polar')
+        init_params['probe_aberrations'] = Aberrations(aberrations).export(notation='krivanek', style='polar', round_decimals=round_decimals)
     
     return init_params
 

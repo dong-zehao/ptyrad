@@ -9,6 +9,7 @@ import pathlib
 from typing import Any, Dict, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, FilePath, field_validator, model_serializer, model_validator
+from .probe_params import ProbeParams
 
 
 class OptimizerParams(BaseModel):
@@ -142,6 +143,8 @@ class ModelParams(BaseModel):
     """
 
     model_config = {"extra": "forbid"}
+    probe_params: ProbeParams = Field(default_factory=ProbeParams,
+                                     description="Optional single-mode aberration-parametrized probe")
     
     
     detector_blur_std: Optional[float] = Field(

@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from ptyrad.core import PtychoModel
+from ptyrad.core.models.parametrized import create_ptycho_model, prepare_parametrized_params
 from ptyrad.core.losses import get_objp_contrast
 from ptyrad.io.save import save_results
 from ptyrad.optics.aberrations import Aberrations
@@ -194,6 +195,7 @@ def optuna_objective(trial, params, init, loss_fn, constraint_fn, device='cuda')
     import optuna
     
     params = deepcopy(params)
+    prepare_parametrized_params(params)
     
     # ==============================================================================
     # SECTION 1: PARSE CONFIGS
@@ -345,7 +347,7 @@ def optuna_objective(trial, params, init, loss_fn, constraint_fn, device='cuda')
     # ==============================================================================
    
     # Create the model, optimizer, and scheduler; prepare indices, batches, and output_path
-    model         = PtychoModel(init.init_variables, params['model_params'], device=device)
+    model         = create_ptycho_model(init, params, device=device)
     optimizer     = create_optimizer(model.optimizer_params, model.optimizable_params)
     scheduler     = create_scheduler(model.scheduler_params, optimizer)
     if params['model_params']['optimizer_params']['name'] == 'LBFGS' and scheduler is not None:

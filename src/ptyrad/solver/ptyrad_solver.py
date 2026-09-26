@@ -11,6 +11,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from ptyrad.core import CombinedConstraint, CombinedLoss, PtychoModel
+from ptyrad.core.models.parametrized import create_ptycho_model, prepare_parametrized_params
 from ptyrad.init import Initializer
 from ptyrad.io.dataloader import IndicesDataset
 from ptyrad.params.parser import copy_params_to_dir
@@ -41,6 +42,7 @@ class PtyRADSolver(object):
     """
     def __init__(self, params, device=None, seed=None, acc=None):
         self.params          = deepcopy(params)
+        prepare_parametrized_params(self.params)
         self.if_hypertune    = self.params.get('hypertune_params', {}).get('if_hypertune', False)
         self.accelerator     = acc
         self.use_acc_device  = device is None and acc is not None
@@ -96,7 +98,7 @@ class PtyRADSolver(object):
         device = self.device
         
         # Create the model, optimizer, and scheduler; prepare indices, batches, and output_path
-        model         = PtychoModel(self.init.init_variables, params['model_params'], device=device)
+        model         = create_ptycho_model(self.init, params, device=device)
         optimizer     = create_optimizer(model.optimizer_params, model.optimizable_params)
         scheduler     = create_scheduler(model.scheduler_params, optimizer)
         indices, batches, output_path = prepare_recon(model, self.init, params)
