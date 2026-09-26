@@ -80,6 +80,18 @@ class ParametrizedProbe(nn.Module):
                            self.normalized_coefficients / self.phase_per_angstrom,
                            self.fixed_coefficients)
 
+    @torch.no_grad()
+    def shift_defocus(self, distance):
+        """Apply paraxial propagation by distance (Angstrom), even for frozen C10.
+
+        Keep both coefficient representations synchronized without replacing the
+        parameter bound to the optimizer. Freezing only disables gradient updates.
+        """
+        index = self.names.index("C10")
+        value = self.current_coefficients()[index] + distance
+        self.normalized_coefficients[index].copy_(value * self.phase_per_angstrom[index])
+        self.fixed_coefficients[index].copy_(value)
+
     def from_values(self, values):
         chi = torch.einsum("c,cyx->yx", values, self.basis)
         # exp(-i chi), expressed with real kernels (also avoids CUDA complex-exp JIT).

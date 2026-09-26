@@ -75,8 +75,8 @@ with one subplot per aberration order.
 The probe has one mode, a fixed circular aperture, fixed convergence angle, and
 fixed total intensity determined by the existing initialization normalization.
 `probe_z_shift` is a fixed angular-spectrum propagation after probe formation.
-Probe masks, mode orthogonalization, fixed-intensity projection, and object
-z-recentering constraints are disabled with a log message. The remaining
+Probe masks, mode orthogonalization, and fixed-intensity projection
+constraints are disabled with a log message. The remaining
 constraints and losses are unchanged. Probe permutation, interpolation,
 recentering, external pixel-probe fitting, X-ray illumination, and mode-count
 hyperparameter searches are unsupported in this mode.
@@ -90,3 +90,22 @@ wavelength, aperture, and training configuration; optimizer state can be restore
 through the existing `optimizer_params.load_state`. Pixel-only checkpoints cannot
 initialize a parametrized reconstruction. Coefficients and fixed intensity from
 the checkpoint take precedence over initialization values on resume.
+
+Object `obj_z_recenter` is supported: an object shift of `s` slices changes
+`C10` by `-s * slice_thickness` in Angstroms. This is a paraxial defocus
+correction, whereas pixel probes use full angular-spectrum propagation.
+The correction also applies when C10 is frozen or probe optimization is inactive;
+freezing only disables gradient updates. Coefficient histories and checkpoints
+include these corrections. `probe_z_shift` remains unchanged.
+
+At normal completion, the main process prints the final complete Cartesian
+aberration dictionary as copyable YAML, independently of the save interval:
+
+```yaml
+probe_aberrations: {C10: -100.0, C12a: 0.0, C12b: 0.0}
+```
+
+The example is abbreviated; the actual output includes every coefficient without
+display rounding. Copy it into `init_params.probe_aberrations` for simulated
+initialization, keeping the same sampling, wavelength, aperture, total intensity,
+and `probe_z_shift` to reproduce the final probe.

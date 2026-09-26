@@ -199,7 +199,9 @@ def test_configuration_and_preparation():
                       ['probe_mask_k', 'probe_mask_r', 'obj_z_recenter', 'ortho_pmode', 'fix_probe_int']})
     prepare_parametrized_params(params)
     assert params['init_params']['probe_pmode_max'] == 1
-    assert all(c['start_iter'] is None for c in params['constraint_params'].values())
+    assert params['constraint_params']['obj_z_recenter']['start_iter'] == 1
+    assert all(c['start_iter'] is None for name, c in params['constraint_params'].items()
+               if name != 'obj_z_recenter')
     params['init_params']['probe_source'] = 'custom'
     with pytest.raises(ValueError):
         prepare_parametrized_params(params)
@@ -417,3 +419,152 @@ def test_high_order_phase_fit_has_useful_gradients():
         opt.step()
     assert losses[-1] < losses[0] * .05
     assert probe.normalized_coefficients[i].item() == pytest.approx(.2, abs=.03)
+
+
+@pytest.mark.parametrize('distance', [-13.5, 0., 7.25])
+@pytest.mark.parametrize('frozen', [False, True])
+def test_defocus_shift_matches_paraxial_propagation(distance, frozen):
+    gen = generator({'C10': 12.3, 'C12a': 20., 'C70': 200000.}, z_shift=25.)
+    index = gen.names.index('C10')
+    gen.trainable_mask[index] = not frozen
+    parameter = gen.normalized_coefficients
+    before = gen.current_coefficients().detach().clone()
+    original = gen().detach()
+    k = torch.fft.fftfreq(16, d=.2, dtype=torch.float64)
+    ky, kx = torch.meshgrid(k, k, indexing='ij')
+    transfer = torch.exp(-1j * torch.pi * gen.geometry['wavelength'] * distance *
+                         (kx.square() + ky.square()))
+    expected = torch.fft.ifft2(torch.fft.fft2(original) * transfer)
+    gen.shift_defocus(distance)
+    assert gen.normalized_coefficients is parameter
+    target = before.clone()
+    target[index] += distance
+    torch.testing.assert_close(gen.current_coefficients(), target)
+    torch.testing.assert_close(gen.fixed_coefficients[index], target[index])
+    torch.testing.assert_close(gen(), expected, atol=1e-10, rtol=1e-10)
+    gen.shift_defocus(-distance)
+    torch.testing.assert_close(gen(), original, atol=1e-10, rtol=1e-10)
+
+
+@pytest.mark.parametrize('overrides,start', [({}, 1), ({'C10': {'trainable': False}}, 1),
+                                            ({'C10': {'lr': 0.}}, 1), ({}, None)])
+def test_recenter_updates_live_probe_and_survives_optimizer(overrides, start, tmp_path):
+    from ptyrad.core.constraints import CombinedConstraint, shift_obj_along_z
+
+    _, values, params, init = fixture_model(overrides, start=start)
+    phase = np.zeros((1, 5, 20, 20), dtype='float32')
+    phase[:, 1] = .3  # CoM=1, desired center=2: move by +1 slice.
+    values['obj'] = np.exp(1j * phase).astype('complex64')
+    values['slice_thickness'] = 2.5
+    model = ParametrizedPtychoModel(values, params, init)
+    gen = model.probe_generator
+    constraint = CombinedConstraint({'obj_z_recenter': dict(
+        start_iter=2, step=2, end_iter=5, thresh=None, scale=1., max_shift=1.)}, device='cpu')
+    before = gen.current_coefficients().detach().clone()
+    obj_before = torch.polar(model.opt_obja, model.opt_objp).detach()
+    optimizer = create_optimizer(model.optimizer_params, model.optimizable_params) if start else None
+    with torch.no_grad():
+        constraint.apply_obj_z_recenter(model, 1)
+        torch.testing.assert_close(gen.current_coefficients(), before)
+        constraint.apply_obj_z_recenter(model, 2)
+    expected = before.clone()
+    expected[gen.names.index('C10')] -= 2.5
+    torch.testing.assert_close(gen.current_coefficients(), expected)
+    torch.testing.assert_close(torch.polar(model.opt_obja, model.opt_objp),
+                               shift_obj_along_z(obj_before, 1.))
+    if optimizer:
+        # A subsequent zero-gradient step must not restore the old C10.
+        gen.normalized_coefficients.grad = torch.zeros_like(gen.normalized_coefficients)
+        optimizer.step()
+        torch.testing.assert_close(gen.current_coefficients(), expected)
+    model.record_probe_coefficients(2)
+    assert model.probe_coefficient_iters['coefficients']['C10'][-1] == pytest.approx(-2.5)
+    path = tmp_path / 'recentered.hdf5'
+    save_dict_to_hdf5({'parametrized_probe': model.export_parametrized_probe()}, str(path))
+    restored = ParametrizedPtychoModel(values, params, init,
+                                      state=load_ptyrad(str(path))['parametrized_probe'])
+    torch.testing.assert_close(restored.get_complex_probe_view(), model.get_complex_probe_view())
+
+
+@pytest.mark.parametrize('pixel', [False, True])
+@pytest.mark.parametrize('source_slice', [1, 2, 3])
+def test_recenter_sign_zero_and_pixel_branch(pixel, source_slice):
+    from ptyrad.core.constraints import CombinedConstraint
+    from ptyrad.core.functional import near_field_evolution_torch
+    from ptyrad.core.models.ptycho import PtychoModel
+
+    _, values, params, init = fixture_model()
+    phase = np.zeros((1, 5, 20, 20), dtype='float32')
+    phase[:, source_slice] = .5
+    values['obj'] = np.exp(1j * phase).astype('complex64')
+    values['slice_thickness'] = 3.
+    model = (PtychoModel(values, params, device='cpu') if pixel else
+             ParametrizedPtychoModel(values, params, init))
+    before = model.get_complex_probe_view().detach().clone()
+    constraint = CombinedConstraint({'obj_z_recenter': dict(
+        start_iter=1, step=1, end_iter=None, thresh=None, scale=1., max_shift=1.)}, device='cpu')
+    distance = -(2 - source_slice) * 3.
+    with torch.no_grad():
+        constraint.apply_obj_z_recenter(model, 1)
+    if pixel:
+        transfer = near_field_evolution_torch(before.shape[-2:], model.dx, distance,
+                                              model.lambd, device='cpu')
+        torch.testing.assert_close(model.get_complex_probe_view(),
+                                   torch.fft.ifft2(torch.fft.fft2(before) * transfer))
+    else:
+        assert model.export_parametrized_probe()['coefficients']['C10'] == pytest.approx(distance, abs=1e-6)
+    # A second call after centering should not add another full-slice correction.
+    centered = model.get_complex_probe_view().detach().clone()
+    with torch.no_grad():
+        constraint.apply_obj_z_recenter(model, 2)
+    torch.testing.assert_close(model.get_complex_probe_view(), centered, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize('rank_mode,should_log', [('single', True), ('main', True),
+                                                ('worker', False), ('ddp_main', True),
+                                                ('ddp_worker', False), ('pixel', False)])
+def test_final_aberration_yaml_roundtrip(monkeypatch, caplog, rank_mode, should_log):
+    import logging
+    import yaml
+    from ptyrad.params.recon_params import ReconParams
+    from ptyrad.solver import reconstruction
+
+    model, values, params, init_params = fixture_model({'C12a': {'trainable': False}})
+    init_params['probe_aberrations'] = {'C12a': .123456789, 'C70': 12345.6789}
+    init_params['probe_z_shift'] = 25.
+    model = ParametrizedPtychoModel(values, params, init_params)
+    if rank_mode == 'pixel':
+        from ptyrad.core.models.ptycho import PtychoModel
+        model = PtychoModel(values, params, device='cpu')
+    model.compilation_iters = []
+    recon_params = ReconParams().model_dump()
+    recon_params.update(NITER=2, SAVE_ITERS=3, convergence_monitor=None)
+    def step(*args, **kwargs):
+        if hasattr(model, 'probe_generator'):
+            model.probe_generator.shift_defocus(-1.25)
+        model.iter_times.append(.1)
+        return {}
+    monkeypatch.setattr(reconstruction, 'recon_step', step)
+    monkeypatch.setattr(reconstruction, 'toggle_grad_requires', lambda *args: None)
+    monkeypatch.setattr(reconstruction, 'save_results', lambda *args: pytest.fail('Unexpected save'))
+    monkeypatch.setattr(torch.distributed, 'is_initialized', lambda: rank_mode.startswith('ddp'))
+    monkeypatch.setattr(torch.distributed, 'get_rank', lambda: int(rank_mode == 'ddp_worker'))
+    acc = (SimpleNamespace(num_processes=2, is_main_process=rank_mode == 'main')
+           if rank_mode in ('main', 'worker') else None)
+    with caplog.at_level(logging.INFO, logger=reconstruction.__name__):
+        reconstruction.recon_loop(
+            model, SimpleNamespace(init_variables=values),
+            {'recon_params': recon_params, 'model_params': params},
+            SimpleNamespace(step=lambda: None), None, None, None, [], [], '', acc=acc)
+    records = [r for r in caplog.records if 'Final parametrized probe aberrations' in r.getMessage()]
+    assert len(records) == int(should_log)
+    if should_log:
+        # Timestamp only prefixes the explanation, not the copyable YAML line.
+        output = logging.Formatter('%(asctime)s - %(message)s').format(records[0])
+        copied = yaml.safe_load(output.split('\n', 1)[1])
+        assert copied['probe_aberrations'] == model.export_parametrized_probe()['coefficients']
+        assert copied['probe_aberrations']['C10'] == pytest.approx(-2.5)
+        assert 'C70' in copied['probe_aberrations']
+        init_params.update(copied)
+        restored = ParametrizedPtychoModel(values, params, init_params)
+        torch.testing.assert_close(restored.get_complex_probe_view(), model.get_complex_probe_view())

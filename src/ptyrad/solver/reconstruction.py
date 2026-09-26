@@ -8,6 +8,7 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import yaml
 
 from ptyrad.io.adapter import ndarrays_to_tensors
 from ptyrad.io.save import make_output_folder, safe_filename, save_results
@@ -560,6 +561,16 @@ def recon_loop(model, init, params, optimizer, scheduler, loss_fn, constraint_fn
                     ## Saving summary
                     plot_summary(output_path, model_instance, niter, indices, init_variables, selected_figs=selected_figs, show_fig=False, save_fig=True)
     
+    is_main_process = (acc.is_main_process if acc is not None else
+                       not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0)
+    if is_main_process and hasattr(model_instance, "export_parametrized_probe"):
+        coefficients = model_instance.export_parametrized_probe()["coefficients"]
+        aberrations_yaml = yaml.safe_dump(
+            {"probe_aberrations": coefficients}, sort_keys=False, default_flow_style=None,
+            width=1000000).rstrip()
+        logger.info("Final parametrized probe aberrations (Angstrom). Copy into init_params; "
+                    "keep the same probe geometry, intensity and probe_z_shift:\n%s", aberrations_yaml)
+
     logger.info(f"### Finished {NITER} iterations, averaged iter_t = {np.mean(model_instance.iter_times):.5g} with std = {np.std(model_instance.iter_times):.3f} ###")
     logger.info(" ")
 

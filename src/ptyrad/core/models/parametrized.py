@@ -46,7 +46,7 @@ def prepare_parametrized_params(params):
     # Older/direct dictionary callers may also supply the simulation mode count.
     if "pmodes" in init:
         init["pmodes"] = 1
-    for name in ("probe_mask_k", "probe_mask_r", "obj_z_recenter", "ortho_pmode", "fix_probe_int"):
+    for name in ("probe_mask_k", "probe_mask_r", "ortho_pmode", "fix_probe_int"):
         config = params.get("constraint_params", {}).get(name)
         if config is not None and config.get("start_iter") is not None:
             logger.warning("Parametrized probe: disabling %s (fixed aperture, intensity and single mode)", name)
