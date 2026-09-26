@@ -27,6 +27,7 @@ class CoefficientParams(BaseModel):
 class ProbeParams(BaseModel):
     model_config = {"extra": "forbid"}
     parametrize: bool = False
+    lr_gamma: float = Field(default=0.25, ge=0, allow_inf_nan=False)
     coefficients: dict[str, CoefficientParams] = Field(default_factory=dict)
 
     @field_validator("coefficients")

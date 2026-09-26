@@ -6,6 +6,7 @@ Add this to an existing electron reconstruction configuration:
 model_params:
   probe_params:
     parametrize: true
+    lr_gamma: 0.25
     coefficients: {}
   update_params:
     probe: {start_iter: 1, lr: 1.0}
@@ -19,13 +20,14 @@ with one optimizer parameter group and tensor-valued optimizer state. Names map
 to entries in the saved `coefficient_names` list. Initial values are read from
 `init_params.probe_aberrations`, using its existing aliases and units. The
 learning rate above is an example, in Angstrom per C10 update; the pixel-probe
-learning rate may be too small for useful coefficient refinement. By default,
-the learning rate of each coefficient is normalized to produce the same maximum
-phase change at the aperture edge as C10. For aberration order `n` and probe
-convergence semi-angle `alpha` in radians, the multiplier is
-`(n + 1) / (2 * alpha ** (n - 1))`. All angular components of the same order
-share the multiplier. At 25 mrad, the multipliers for orders 1 through 5 are
-1, 60, 3200, 160000, and 7680000.
+learning rate may be too small for useful coefficient refinement. For aberration
+order `n` and probe convergence semi-angle `alpha` in radians, the automatic
+multiplier is `((n + 1) / 2 * alpha ** (1 - n)) ** lr_gamma`. The default
+`lr_gamma` is `0.25`; set it to `1` for full aperture-edge phase normalization
+or `0` for the same learning rate across orders. All angular components of the
+same order share the multiplier. At 25 mrad, the raw multipliers for orders 1
+through 5 are 1, 60, 3200, 160000, and 7680000; `lr_gamma` raises each to
+the chosen power.
 
 `coefficients` contains overrides, not initial values or an allowlist:
 

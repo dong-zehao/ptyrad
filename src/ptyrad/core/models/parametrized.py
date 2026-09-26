@@ -105,7 +105,7 @@ class ParametrizedPtychoModel(PtychoModel):
             configured_lr = update["lr"] if explicit_lr is None else explicit_lr
             active = trainable and configured_lr > 0 and update.get("start_iter") is not None
             configured_rates.append(configured_lr if active else 0.0)
-            scale = (phase_normalized_lr_scale(name, geometry["conv_angle"])
+            scale = (phase_normalized_lr_scale(name, geometry["conv_angle"], config["lr_gamma"])
                      if explicit_lr is None else 1.0)
             rates.append(configured_lr * scale if active else 0.0)
         key = "probe_coefficients"

@@ -54,7 +54,7 @@ def test_all_zero_coefficients_have_correct_gradients():
         assert jac.abs().max() > 0
 
 
-def fixture_model(overrides=None, start=1, end=None, state=None):
+def fixture_model(overrides=None, start=1, end=None, state=None, lr_gamma=0.25):
     torch.manual_seed(2)
     n = 16
     init_params = dict(probe_conv_angle=25, probe_aberrations={}, probe_z_shift=0)
@@ -70,7 +70,8 @@ def fixture_model(overrides=None, start=1, end=None, state=None):
     for update in params['update_params'].values():
         update.update(lr=0., start_iter=None)
     params['update_params']['probe'].update(lr=1., start_iter=start, end_iter=end)
-    params['probe_params'] = dict(parametrize=True, coefficients=overrides or {})
+    params['probe_params'] = dict(parametrize=True, lr_gamma=lr_gamma,
+                                  coefficients=overrides or {})
     return ParametrizedPtychoModel(values, params, init_params, state=state), values, params, init_params
 
 
@@ -78,7 +79,7 @@ def uniform_rate_overrides():
     return {name: {'lr': 1.} for name in default_coefficients()}
 
 
-def test_default_rates_normalize_aperture_edge_phase():
+def test_default_rates_apply_gamma_to_aperture_edge_normalization():
     model, values, params, init = fixture_model()
     group = model.optimizable_params[0]
     scales = dict(zip(model.probe_generator.names, group['probe_update_scale']))
@@ -86,7 +87,7 @@ def test_default_rates_normalize_aperture_edge_phase():
     assert group['lr'] == 1.
     for name in ('C10', 'C12a', 'C21b', 'C30', 'C32a', 'C50', 'C56b'):
         order = int(name[1])
-        assert scales[name] == pytest.approx((order + 1) / 2 * alpha ** (1 - order))
+        assert scales[name] == pytest.approx(((order + 1) / 2 * alpha ** (1 - order)) ** 0.25)
 
     # The step hook scales Adam's actual update, not its input gradient.
     vector = model.probe_generator.coefficients
@@ -101,7 +102,12 @@ def test_default_rates_normalize_aperture_edge_phase():
     narrower = ParametrizedPtychoModel(values, params, init)
     narrower_scales = dict(zip(narrower.probe_generator.names,
                                narrower.optimizable_params[0]['probe_update_scale']))
-    assert narrower_scales['C30'] == pytest.approx(2 / .02 ** 2)
+    assert narrower_scales['C30'] == pytest.approx((2 / .02 ** 2) ** 0.25)
+
+    full, _, _, _ = fixture_model(lr_gamma=1.)
+    full_scales = dict(zip(full.probe_generator.names,
+                           full.optimizable_params[0]['probe_update_scale']))
+    assert full_scales['C30'] == pytest.approx(3200.)
 
 
 def test_explicit_rates_replace_default_normalization():
@@ -111,7 +117,7 @@ def test_explicit_rates_replace_default_normalization():
     assert group['lr'] == 7.
     assert scales['C10'] == pytest.approx(1 / 7)
     assert scales['C30'] == pytest.approx(1.)
-    assert scales['C32a'] == pytest.approx(3200 / 7)
+    assert scales['C32a'] == pytest.approx(3200 ** 0.25 / 7)
     assert scales['C50'] == 0
 
 
@@ -176,12 +182,15 @@ def test_reconstruction_backward_and_checkpoint(tmp_path):
 
 def test_configuration_and_preparation():
     assert not ModelParams().probe_params.parametrize
+    assert ProbeParams().lr_gamma == 0.25
     for name in ['C12', 'phi12', 'Cs', 'C10a', 'C11a']:
         with pytest.raises(ValueError):
             ProbeParams(coefficients={name: {}})
     for lr in [-1, float('nan'), float('inf')]:
         with pytest.raises(ValueError):
             ProbeParams(coefficients={'C10': {'lr': lr}})
+        with pytest.raises(ValueError):
+            ProbeParams(lr_gamma=lr)
     params = dict(model_params={'probe_params': {'parametrize': True}},
                   init_params={'probe_pmode_max': 4},
                   constraint_params={key: {'start_iter': 1} for key in
