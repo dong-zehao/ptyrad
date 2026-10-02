@@ -670,7 +670,7 @@ def recon_step(batches, grad_accumulation, model, optimizer, scheduler, loss_fn,
         # Record losses on GPU without CPU sync
         if acc is not None:
             acc.wait_for_everyone()
-        for loss_name, loss_value in zip(loss_names, losses):
+        for loss_name, loss_value in zip(loss_names, losses, strict=True):
             loss_accum[loss_name][batch_count] = loss_value.detach()
         batch_count += 1
 
@@ -711,7 +711,7 @@ def recon_step(batches, grad_accumulation, model, optimizer, scheduler, loss_fn,
             # Record losses on GPU without CPU sync
             if acc is not None:
                 acc.wait_for_everyone()
-            for loss_name, loss_value in zip(loss_names, losses):
+            for loss_name, loss_value in zip(loss_names, losses, strict=True):
                 loss_accum[loss_name][batch_count] = loss_value.detach()
             batch_count += 1
 
@@ -809,6 +809,12 @@ def compute_loss(batch, model, model_instance, measured_DP, loss_fn):
     object_patches = model_instance._current_object_patches
     loss_batch, losses = loss_fn(model_DP, measured_DP, object_patches[0], object_patches[1], model_instance.omode_occu,
                                  model_instance.get_complex_probe_view())
+    if len(losses) != len(loss_fn.loss_params):
+        raise RuntimeError(
+            "Loss implementation/configuration mismatch: returned "
+            f"{len(losses)} terms for {len(loss_fn.loss_params)} configured losses. "
+            "Check the installed PtyRAD source; a configured loss may be missing from forward()."
+        )
    
     return loss_batch, losses
 
@@ -831,7 +837,7 @@ def loss_logger(batch_losses, niter, iter_t):
         loss values for each component.
     """
     avg_losses = {name: np.mean(values) for name, values in batch_losses.items()}
-    loss_str = ', '.join([f"{name}: {value:.4f}" for name, value in avg_losses.items()])
+    loss_str = ', '.join([f"{name}: {value:.6g}" for name, value in avg_losses.items()])
     logger.info(f"Iter: {niter}, Total Loss: {sum(avg_losses.values()):.4f}, {loss_str}, in {parse_sec_to_time_str(iter_t)}")
     loss_iter = sum(avg_losses.values())
     return loss_iter

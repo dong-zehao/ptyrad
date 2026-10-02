@@ -3,12 +3,16 @@ Loss functions and soft regularizations calculated using forward simulations aga
 
 """
 
+import logging
+
 import torch
 from torch.nn.functional import interpolate
 from torchvision.transforms.functional import gaussian_blur
 
 from ptyrad.utils.image_proc import normalize_from_zero_to_one
 from ptyrad.core.probe_regularization import interior_aperture_mask, mixed_curvature, product_curvature
+
+logger = logging.getLogger(__name__)
 
 # The CombinedLoss takes a user-defined dict of loss_params, which specifies the state, weight, and param of each loss term
 # The DP related loss takes a parameter of dp_pow which raise the DP with certain power, 
@@ -57,6 +61,14 @@ class CombinedLoss(torch.nn.Module):
         self._probe_reg_mask = interior_aperture_mask(
             probe.shape[-2:], float(model.dx), float(model.lambd),
             conv_angle, params['aperture_fraction'], probe.device,
+        )
+        with torch.no_grad():
+            initial_loss = self.get_loss_probe_reg(probe)
+        if not torch.isfinite(initial_loss):
+            raise ValueError("loss_probe_reg is non-finite on the initial probe")
+        logger.info(
+            "loss_probe_reg configured: mode=%s, weight=%g, mask_pixels=%d, initial weighted loss=%.8e",
+            params['mode'], params['weight'], self._probe_reg_mask.sum().item(), initial_loss.item(),
         )
 
     def get_loss_probe_reg(self, probe):
@@ -183,14 +195,17 @@ class CombinedLoss(torch.nn.Module):
         Combines all the loss components and returns the total loss and individual losses.
 
         """
-        losses = []
-        losses.append(self.get_loss_single(model_DP, measured_DP))
-        losses.append(self.get_loss_poissn(model_DP, measured_DP))
-        losses.append(self.get_loss_pacbed(model_DP, measured_DP))
-        losses.append(self.get_loss_sparse(objp_patches, omode_occu))
-        losses.append(self.get_loss_simlar(obja_patches, objp_patches, omode_occu))
+        losses_by_name = {
+            'loss_single': self.get_loss_single(model_DP, measured_DP),
+            'loss_poissn': self.get_loss_poissn(model_DP, measured_DP),
+            'loss_pacbed': self.get_loss_pacbed(model_DP, measured_DP),
+            'loss_sparse': self.get_loss_sparse(objp_patches, omode_occu),
+            'loss_simlar': self.get_loss_simlar(obja_patches, objp_patches, omode_occu),
+        }
         if 'loss_probe_reg' in self.loss_params:
-            losses.append(self.get_loss_probe_reg(probe))
+            losses_by_name['loss_probe_reg'] = self.get_loss_probe_reg(probe)
+        # Unvalidated YAML and HDF5 reloads need not preserve schema field order.
+        losses = [losses_by_name[name] for name in self.loss_params]
         total_loss = sum(losses)
         return total_loss, losses
     

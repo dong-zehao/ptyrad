@@ -223,3 +223,70 @@ def test_reconstruction_step_records_probe_loss():
                           lambda _model, _iteration: None, 1, 1, compute_loss_fn=compute_loss)
     assert recorded['loss_probe_reg'][0] > 0
     assert len(model.loss_iters) == 1
+
+
+def test_loss_names_follow_reordered_unvalidated_config():
+    params = _loss_params(mode='mixed')
+    params = {name: params[name] for name in sorted(params)}
+    loss_fn = CombinedLoss(params, device='cpu')
+    probe = _probe()
+    loss_fn.configure_probe_reg(_model(probe), {'probe_conv_angle': 12.0}, {})
+    dp = torch.ones(1, 4, 4)
+    patches = torch.zeros(1, 1, 1, 2, 2)
+    total, values = loss_fn(dp * 2, dp, patches, patches, torch.ones(1), probe)
+    recorded = dict(zip(params, values, strict=True))
+    assert recorded['loss_probe_reg'] == loss_fn.get_loss_probe_reg(probe)
+    assert recorded['loss_single'] == loss_fn.get_loss_single(dp * 2, dp)
+    assert recorded['loss_simlar'] == 0
+    assert total == sum(recorded.values())
+
+
+def test_compute_loss_rejects_silently_omitted_regularizer():
+    class LegacyLoss:
+        loss_params = _loss_params()
+
+        def __call__(self, *args):
+            values = [torch.tensor(0.1)] + [torch.tensor(0.0)] * 4
+            return sum(values), values
+
+    class Model:
+        omode_occu = torch.ones(1)
+        _current_object_patches = (torch.ones(1), torch.zeros(1))
+
+        def __call__(self, batch):
+            return torch.ones(1)
+
+        def get_complex_probe_view(self):
+            return _probe()
+
+    model = Model()
+    with pytest.raises(RuntimeError, match='returned 5 terms for 6'):
+        compute_loss(None, model, model, torch.ones(1), LegacyLoss())
+
+
+@pytest.mark.parametrize('backend', ['eager', 'aot_eager'])
+def test_compiled_loss_tracks_probe_after_unfreezing_and_updates_it(backend):
+    params = _loss_params()
+    loss_fn = CombinedLoss(params, device='cpu')
+    probe = torch.nn.Parameter(_probe(nmodes=1), requires_grad=False)
+    loss_fn.configure_probe_reg(_model(probe), {'probe_conv_angle': 12.0}, {})
+    compiled = torch.compile(loss_fn.get_loss_probe_reg, backend=backend)
+    frozen_value = compiled(probe).detach().clone()
+    probe.requires_grad_(True)
+    optimizer = torch.optim.SGD([probe], lr=10.0)
+    for _ in range(3):
+        optimizer.zero_grad()
+        compiled(probe).backward()
+        assert torch.isfinite(probe.grad).all()
+        assert probe.grad.abs().sum() > 0
+        optimizer.step()
+    assert compiled(probe) < frozen_value
+    assert torch.allclose(compiled(probe), loss_fn.get_loss_probe_reg(probe))
+
+
+def test_loss_logger_preserves_small_nonzero_terms(caplog):
+    from ptyrad.solver.reconstruction import loss_logger
+
+    with caplog.at_level('INFO', logger='ptyrad.solver.reconstruction'):
+        loss_logger({'loss_probe_reg': [6.17e-6]}, 1, 0.1)
+    assert 'loss_probe_reg: 6.17e-06' in caplog.text
