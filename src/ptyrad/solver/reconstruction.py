@@ -807,7 +807,8 @@ def compute_loss(batch, model, model_instance, measured_DP, loss_fn):
     
     model_DP = model(batch)
     object_patches = model_instance._current_object_patches
-    loss_batch, losses = loss_fn(model_DP, measured_DP, object_patches[0], object_patches[1], model_instance.omode_occu)
+    loss_batch, losses = loss_fn(model_DP, measured_DP, object_patches[0], object_patches[1], model_instance.omode_occu,
+                                 model_instance.get_complex_probe_view())
    
     return loss_batch, losses
 

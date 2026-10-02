@@ -163,9 +163,11 @@ def test_loss_fn(model, indices, loss_fn):
     import torch
     
     with torch.no_grad():
-        model_CBEDs, objp_patches = model(indices)
+        model_CBEDs = model(indices)
+        obja_patches, objp_patches = model._current_object_patches
         measured_CBEDs = model.get_measurements(indices)
-        _, losses = loss_fn(model_CBEDs, measured_CBEDs, objp_patches, model.omode_occu)
+        _, losses = loss_fn(model_CBEDs, measured_CBEDs, obja_patches, objp_patches,
+                            model.omode_occu, model.get_complex_probe_view())
 
         # Print loss_name and loss_value with padding
         for loss_name, loss_value in zip(loss_fn.loss_params.keys(), losses):

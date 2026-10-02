@@ -346,6 +346,7 @@ def optuna_objective(trial, params, init, loss_fn, constraint_fn, device='cuda')
    
     # Create the model, optimizer, and scheduler; prepare indices, batches, and output_path
     model         = PtychoModel(init.init_variables, params['model_params'], device=device)
+    loss_fn.configure_probe_reg(model, init.init_params, params['constraint_params'])
     optimizer     = create_optimizer(model.optimizer_params, model.optimizable_params)
     scheduler     = create_scheduler(model.scheduler_params, optimizer)
     if params['model_params']['optimizer_params']['name'] == 'LBFGS' and scheduler is not None:

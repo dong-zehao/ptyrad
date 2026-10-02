@@ -97,6 +97,7 @@ class PtyRADSolver(object):
         
         # Create the model, optimizer, and scheduler; prepare indices, batches, and output_path
         model         = PtychoModel(self.init.init_variables, params['model_params'], device=device)
+        self.loss_fn.configure_probe_reg(model, self.init.init_params, params['constraint_params'])
         optimizer     = create_optimizer(model.optimizer_params, model.optimizable_params)
         scheduler     = create_scheduler(model.scheduler_params, optimizer)
         indices, batches, output_path = prepare_recon(model, self.init, params)

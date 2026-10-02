@@ -52,6 +52,15 @@ class LossSimlar(BaseModel):
     blur_std: float = Field(default=1.0, ge=0.0, description="Standard deviation for Gaussian blur")
 
 
+class LossProbeReg(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    state: bool = Field(default=False, description="Enable/disable pupil consistency regularization")
+    weight: float = Field(default=0.1, ge=0.0, description="Weight of probe regularization term")
+    mode: Literal["primary", "mixed"] = Field(default="primary", description="Dominant mode or mode-invariant mixed-state penalty")
+    aperture_fraction: float = Field(default=0.85, gt=0.0, le=1.0, description="Fraction of the electron probe convergence semi-angle used as the interior mask")
+
+
 class LossParams(BaseModel):
     """
     Generally, the reconstruction loss is the CombinedLoss = weight1 * loss1 + weight2 * loss2 + weight3 * loss3 ...
@@ -62,7 +71,7 @@ class LossParams(BaseModel):
     and their 'dp_pow' would raise the diffraction pattern to a power before the calculation
     For ptychography purpose, you MUST have at least 1 out of the 3 data-error loss terms. 
     Although you can set all of them to true, typical dataset works fine with 'loss_single' alone
-    Soft constraint (regularization)-like loss terms ('loss_sparse', and 'loss_simlar') are optional addition to the required data-error loss terms
+    Soft constraint (regularization)-like loss terms ('loss_sparse', 'loss_simlar', and 'loss_probe_reg') are optional addition to the required data-error loss terms
     Common regularization terms for image reconstruction tasks are total variation (TV) for smoothness and L_n norm (L1 and L2) for sparsity (i.e., promote near-zero or zero in the reconstructed tensor)
 
     """
@@ -105,6 +114,13 @@ class LossParams(BaseModel):
     Setting 'scale_factor' to [1,0.5,0.5]  is equivalent to downsampling the obj 2x along y and x directions before calculating the std, which should encourage the obj modes to keep lateral atom shifts. 
     Similarly, 'blur_std' applies a 2D (lateral) Gaussian blur kernel with specified std to blur the obj before calculating std along omode dimension
     """
+
+    loss_probe_reg: LossProbeReg = Field(default_factory=LossProbeReg, description="Second-order pupil consistency regularization")
+    """Use 'primary' for the sorted dominant mode or 'mixed' for a unitary-mode-invariant penalty.
+    The mask uses aperture_fraction times the electron convergence semi-angle. Disabled by default;
+    tune weight against the data loss and inspect the reconstructed object and diffraction error.
+    This is a roughness prior, not a proven distance to the true solution.
+    """
     
     
     @model_validator(mode="after")
@@ -125,5 +141,6 @@ __all__ = [
     "LossPoissn",
     "LossPacbed",
     "LossSparse",
-    "LossSimlar"
+    "LossSimlar",
+    "LossProbeReg"
 ]

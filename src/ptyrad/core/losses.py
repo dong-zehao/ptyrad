@@ -8,6 +8,7 @@ from torch.nn.functional import interpolate
 from torchvision.transforms.functional import gaussian_blur
 
 from ptyrad.utils.image_proc import normalize_from_zero_to_one
+from ptyrad.core.probe_regularization import interior_aperture_mask, mixed_curvature, product_curvature
 
 # The CombinedLoss takes a user-defined dict of loss_params, which specifies the state, weight, and param of each loss term
 # The DP related loss takes a parameter of dp_pow which raise the DP with certain power, 
@@ -32,6 +33,41 @@ class CombinedLoss(torch.nn.Module):
         self.device = device
         self.loss_params = loss_params
         self.mse = torch.nn.MSELoss(reduction='mean')
+        self.register_buffer('_probe_reg_mask', None, persistent=False)
+
+    def configure_probe_reg(self, model, init_params, constraint_params):
+        """Build the fixed pupil mask for this model and its current calibration."""
+        self._probe_reg_mask = None
+        params = self.loss_params.get('loss_probe_reg', {})
+        if not params.get('state', False):
+            return
+
+        if (init_params.get('probe_illum_type') or 'electron') != 'electron':
+            raise ValueError("loss_probe_reg currently supports electron probes only")
+        conv_angle = init_params.get('probe_conv_angle')
+        if conv_angle is None or conv_angle <= 0:
+            raise ValueError("loss_probe_reg requires a positive probe_conv_angle in mrad")
+
+        probe = model.get_complex_probe_view()
+        if params['mode'] == 'primary' and probe.shape[0] > 1:
+            ortho = constraint_params.get('ortho_pmode', {})
+            if ortho.get('start_iter') != 1 or ortho.get('step') != 1 or ortho.get('end_iter') is not None:
+                raise ValueError("multi-mode primary loss_probe_reg requires ortho_pmode at every iteration from iteration 1")
+
+        self._probe_reg_mask = interior_aperture_mask(
+            probe.shape[-2:], float(model.dx), float(model.lambd),
+            conv_angle, params['aperture_fraction'], probe.device,
+        )
+
+    def get_loss_probe_reg(self, probe):
+        """Compute the weighted pupil prior from the unshifted model probe."""
+        params = self.loss_params.get('loss_probe_reg', {})
+        if not params.get('state', False):
+            return torch.tensor(0, dtype=torch.float32, device=self.device)
+        if probe is None or self._probe_reg_mask is None:
+            raise RuntimeError("enabled loss_probe_reg requires probe and configure_probe_reg")
+        metric = product_curvature(probe, self._probe_reg_mask) if params['mode'] == 'primary' else mixed_curvature(probe, self._probe_reg_mask)
+        return params['weight'] * metric
 
     def get_loss_single(self, model_DP, measured_DP):
         """ Computes the loss based on Gaussian statistics of the diffraction patterns. """
@@ -142,7 +178,7 @@ class CombinedLoss(torch.nn.Module):
             loss_simlar = torch.tensor(0, dtype=torch.float32, device=self.device)
         return loss_simlar
     
-    def forward(self, model_DP, measured_DP, obja_patches, objp_patches, omode_occu):
+    def forward(self, model_DP, measured_DP, obja_patches, objp_patches, omode_occu, probe=None):
         """
         Combines all the loss components and returns the total loss and individual losses.
 
@@ -153,6 +189,8 @@ class CombinedLoss(torch.nn.Module):
         losses.append(self.get_loss_pacbed(model_DP, measured_DP))
         losses.append(self.get_loss_sparse(objp_patches, omode_occu))
         losses.append(self.get_loss_simlar(obja_patches, objp_patches, omode_occu))
+        if 'loss_probe_reg' in self.loss_params:
+            losses.append(self.get_loss_probe_reg(probe))
         total_loss = sum(losses)
         return total_loss, losses
     

@@ -550,11 +550,14 @@ def make_output_folder(
             "loss_pacbed": ("pcb", 2),
             "loss_sparse": ("spr", 2),
             "loss_simlar": ("sml", 2),
+            "loss_probe_reg": ("prg", 2),
         }
 
         for key, (tag, digits) in loss_map.items():
             loss = loss_params.get(key, {})
             if loss.get("state"):
+                if key == "loss_probe_reg":
+                    tag += "p" if loss.get("mode") == "primary" else "m"
                 parts.append(f"{tag}{round(loss.get('weight', 0), digits)}")
 
     # Attach conv_angle (optional)
